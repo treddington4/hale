@@ -1,7 +1,7 @@
 import { useMemo, useState } from "react"
 import type { ChartConfiguration } from "chart.js"
 import { useRuns, useAllRuns } from "@/hooks/useRuns"
-import { useWellness } from "@/hooks/useWellness"
+import { useWellness, useMetrics } from "@/hooks/useWellness"
 import { useSteps } from "@/hooks/useSteps"
 import { useSleepStages } from "@/hooks/useSleepStages"
 import { useHrFloor, isPlausibleHR } from "@/hooks/useHrFloor"
@@ -79,6 +79,7 @@ export function InsightsPage() {
     filter.mode === "all" ? { all: true } : { start: toDateInputValue(start), end: toDateInputValue(end) },
   )
   const allRunsQuery = useAllRuns()
+  const metricsQuery = useMetrics(180)
   const wellnessQuery = useWellness(90)
   const stepsQuery = useSteps(30)
   const sleepStagesQuery = useSleepStages(selectedNight)
@@ -180,6 +181,61 @@ export function InsightsPage() {
     const pts = outdoor.map((r) => ({ x: r.tempF as number, y: r.avgCadence as number })).filter((p) => p.y != null)
     return pts.length ? buildTempScatter(pts, "Cadence", CHART_COLORS.cyan, "spm") : null
   }, [outdoor])
+
+  // Phase 6.2 — PMC (fitness/fatigue/form). CTL/ATL as lines (their own axis,
+  // since they're unbounded rolling averages of daily load); TSB as a bar on a
+  // second axis, colored per-bar (green = fresh/positive, orange = fatigued/
+  // negative) since that sign is the whole point of "form."
+  const pmcConfig = useMemo<ChartConfiguration | null>(() => {
+    const points = metricsQuery.data
+    if (!points || points.length < 2) return null
+    return {
+      type: "line",
+      data: {
+        labels: points.map((p) => p.date.slice(5)),
+        datasets: [
+          {
+            type: "bar",
+            label: "Form (TSB)",
+            data: points.map((p) => p.tsb),
+            backgroundColor: points.map((p) => (p.tsb >= 0 ? CHART_COLORS.green : CHART_COLORS.orange)),
+            yAxisID: "tsb",
+            order: 2,
+          },
+          {
+            type: "line",
+            label: "Fitness (CTL)",
+            data: points.map((p) => p.ctl),
+            borderColor: CHART_COLORS.gold,
+            backgroundColor: CHART_COLORS.gold,
+            yAxisID: "load",
+            tension: 0.25,
+            pointRadius: 0,
+            order: 0,
+          },
+          {
+            type: "line",
+            label: "Fatigue (ATL)",
+            data: points.map((p) => p.atl),
+            borderColor: CHART_COLORS.cyan,
+            backgroundColor: CHART_COLORS.cyan,
+            yAxisID: "load",
+            tension: 0.25,
+            pointRadius: 0,
+            order: 1,
+          },
+        ],
+      },
+      options: {
+        plugins: { legend: { display: true, position: "top", labels: { boxHeight: 8 } } },
+        scales: {
+          load: { type: "linear", position: "left", grid: { color: CHART_COLORS.grid } },
+          tsb: { type: "linear", position: "right", grid: { display: false } },
+          x: { grid: { display: false }, ticks: { maxTicksLimit: 10 } },
+        },
+      },
+    }
+  }, [metricsQuery.data])
 
   const mileageConfig = useMemo<ChartConfiguration<"bar"> | null>(() => {
     if (!weeklyEntries.length) return null
@@ -453,6 +509,14 @@ export function InsightsPage() {
 
   return (
     <div className="flex flex-col gap-4">
+      <ChartPanel
+        title="Training Load (Fitness / Fatigue / Form)"
+        sub="CTL (42d fitness) & ATL (7d fatigue) vs. threshold-HR-based training load; TSB (form) — positive means fresh, negative means fatigued"
+        empty={!pmcConfig ? "Needs at least a couple of days of real training load (Phase 6.1's per-run TSS) to plot." : null}
+      >
+        {pmcConfig && <ChartCanvas config={pmcConfig} height={220} />}
+      </ChartPanel>
+
       <FilterBar state={filter} onChange={setFilter} activityTypeCounts={activityTypeCounts} />
 
       {noRunsInRange ? (

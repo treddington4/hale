@@ -436,6 +436,35 @@ class WeeklyPlan(Base):
     frozen = Column(Boolean, default=False)
 
 
+class DailyMetrics(Base):
+    """Phase 6.2 — one row per (user, date), the PMC (fitness/fatigue/form) pipeline's
+    output. `daily_load` is that day's total training stress (sum of Run.tss across
+    every activity on that date — Phase 6.1's per-run TSS/hrTSS, not a separate
+    formula). `ctl`/`atl` are the standard 42-day/7-day exponentially-weighted
+    rolling averages of daily_load ("fitness"/"fatigue"); `tsb` ("form") is the
+    *previous* day's ctl minus atl — the standard TrainingPeaks convention of
+    representing freshness at the start of a day, before that day's own training is
+    factored in. Always fully recomputed from Run history (app/pipeline.py), never
+    incrementally adjusted — same discipline as Phase 6.1's backfill_run_metrics.
+    Deliberately narrower than the field list floated while first scoping this
+    phase: no `readiness_score` (this codebase's established principle is never to
+    fabricate a composite score — see stats.readiness()/goal_progress()'s own
+    docstrings) and no `hrv_baseline_ms`/`time_in_zone_json` (already computed
+    on-the-fly elsewhere; storing a second copy here isn't needed for the PMC
+    chart this phase actually exists to ship)."""
+    __tablename__ = "daily_metrics"
+    __table_args__ = (UniqueConstraint("user_id", "date", name="uq_daily_metrics_user_date"),)
+
+    id = Column(Integer, primary_key=True, autoincrement=True)
+    user_id = Column(String, ForeignKey("users.id", ondelete="CASCADE"), nullable=False)
+    date = Column(String, nullable=False)  # YYYY-MM-DD
+    daily_load = Column(Float, nullable=False, default=0.0)
+    ctl = Column(Float, nullable=False)
+    atl = Column(Float, nullable=False)
+    tsb = Column(Float, nullable=False)
+    computed_at = Column(String, nullable=True)
+
+
 class CoachIssueDraft(Base):
     """Phase 12.5 — one rolling draft GitHub issue per user, accumulated from two
     sources: the periodic self_review job (scans real, non-test ChatMessage history

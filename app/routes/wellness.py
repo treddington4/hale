@@ -4,7 +4,7 @@ from datetime import datetime, timedelta, timezone
 
 from fastapi import APIRouter, HTTPException, Request, Query, Depends
 
-from ..models import SessionLocal, DailySteps, Run, owned_by
+from ..models import SessionLocal, DailySteps, Run, DailyMetrics, owned_by
 from ..accounts import auth
 from ..util import local_today
 
@@ -20,6 +20,22 @@ def get_steps(days: int = 30, user_id: str = Depends(auth.current_user_id)):
         rows = (db.query(DailySteps).filter(DailySteps.date >= cutoff)
                 .filter(owned_by(DailySteps.user_id, user_id)).order_by(DailySteps.date).all())
         return [{"date": r.date, "steps": r.steps} for r in rows]
+    finally:
+        db.close()
+
+
+# ---------- Phase 6.2: PMC (fitness/fatigue/form) daily metrics ----------
+@router.get("/api/metrics")
+def get_metrics(days: int = 180, user_id: str = Depends(auth.current_user_id)):
+    cutoff = (datetime.now(timezone.utc) - timedelta(days=days)).strftime("%Y-%m-%d")
+    db = SessionLocal()
+    try:
+        rows = (db.query(DailyMetrics).filter(DailyMetrics.date >= cutoff)
+                .filter(owned_by(DailyMetrics.user_id, user_id)).order_by(DailyMetrics.date).all())
+        return [
+            {"date": r.date, "dailyLoad": r.daily_load, "ctl": r.ctl, "atl": r.atl, "tsb": r.tsb}
+            for r in rows
+        ]
     finally:
         db.close()
 

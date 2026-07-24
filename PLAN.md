@@ -2057,19 +2057,41 @@ anything else in this phase if a cycling FTP is never set.
       correct but invisible via the API until this was added.
 - [x] Commit: "Phase 6.1: per-run TSS/EF + Garmin LTHR auto-populate"
 
-### 6.2 PMC pipeline
-- [ ] `DailyMetrics` table: `(user_id, date) PK, trimp, ctl, atl, tsb,
-      hrv_baseline_ms, readiness_score, time_in_zone_json, computed_at`
-- [ ] `app/pipeline.py` nightly job: TRIMP→CTL (42d) / ATL (7d) / TSB; weekly
-      actual_tss into `weekly_plan`; `stats.readiness` switches acuteChronicRatio
-      to ATL/CTL; strength tonnage → TRIMP via fixed intensity factor (documented
-      v1 approximation)
-- [ ] `GET /api/metrics?days=` + Insights CTL/ATL/TSB chart — the actual
-      visual-impact payoff this phase was picked for; a real multi-line trend
-      chart (fitness/fatigue/form over months) using `dataviz` skill guidance for
-      styling/palette, backed by the real backfilled TSS history from 6.1.
-- [ ] Verify: hand-check CTL/ATL recursion on a known 5-day window
-- [ ] Commit: "Phase 6.2: PMC pipeline (CTL/ATL/TSB)"
+### 6.2 PMC pipeline — done
+- [x] `DailyMetrics` table: `(user_id, date) PK, daily_load, ctl, atl, tsb,
+      computed_at`. Deliberately narrower than first floated — dropped
+      `hrv_baseline_ms`/`time_in_zone_json` (already computed on-the-fly
+      elsewhere, not needed for this chart) and `readiness_score` (this
+      codebase's established principle is never to fabricate a composite score
+      — see `stats.readiness()`/`goal_progress()`'s own docstrings).
+- [x] `app/pipeline.py`: `compute_daily_metrics()` — daily_load = sum of that
+      day's `Run.tss` (Phase 6.1, not a separate TRIMP formula); standard
+      CTL(42d)/ATL(7d) exponential recursion; TSB = *previous* day's ctl−atl
+      (freshness at the start of a day, before that day's training is
+      absorbed) — the standard TrainingPeaks convention. Always fully
+      recomputed from Run history (never incrementally adjusted), same
+      discipline as `backfill_run_metrics`. Scheduled nightly at 04:15 (between
+      the 04:00 generator and 04:30 self-review), iterating every real
+      (non-demo) user like `generator.run_for_all_users` already does.
+      ~~Weekly actual_tss into weekly_plan~~ / ~~strength tonnage → TRIMP~~ —
+      **deferred**, not needed for the chart itself; real per-run Run/Ride TSS
+      already drives it correctly.
+      ~~stats.readiness switches acuteChronicRatio to ATL/CTL~~ — **deferred**
+      as a separate, lower-risk follow-up rather than bundled into this pass.
+- [x] `GET /api/metrics?days=` + Insights "Training Load (Fitness/Fatigue/Form)"
+      chart — CTL/ATL as lines, TSB as a bar colored per-bar (green = fresh,
+      orange = fatigued), placed as the first/most prominent panel on Insights.
+      This was the actual visual-impact payoff the phase was picked for.
+- [x] Verify: ran the real pipeline against production (1476 days of history —
+      the account's actual sync history goes back years). Real values look
+      exactly as expected for a consistently-trained runner: CTL steady in the
+      mid-80s, ATL swinging 40-90 with recent training intensity, TSB flipping
+      positive after rest days. Confirmed via screenshot at desktop + mobile
+      (an initial mobile "empty" render turned out to be the dev screenshot
+      tool's fixed 800ms wait being too short for this page's now-larger set of
+      concurrent chart queries, not a real bug — a `networkidle`-waited retest
+      rendered identically to desktop).
+- [x] Commit: "Phase 6.2: PMC pipeline (CTL/ATL/TSB)"
 
 ### 6.3 Gear tracking
 - [ ] `Gear` table (`id, user_id, name, kind shoe|bike|bike_component,

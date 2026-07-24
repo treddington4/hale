@@ -95,6 +95,16 @@ export interface DailyStepsPoint {
   steps: number | null
 }
 
+// Phase 6.2 — PMC (fitness/fatigue/form). ctl="fitness" (42d rolling avg of daily
+// training load), atl="fatigue" (7d rolling avg), tsb="form" (yesterday's ctl-atl).
+export interface DailyMetricPoint {
+  date: string
+  dailyLoad: number
+  ctl: number
+  atl: number
+  tsb: number
+}
+
 export interface GeocodeResult {
   label: string
   cached: boolean
@@ -609,6 +619,7 @@ export const api = {
     return request<Run[]>(`/api/runs${qs ? `?${qs}` : ""}`)
   },
   wellness: (days = 30) => request<WellnessDay[]>(`/api/wellness?days=${days}`),
+  metrics: (days = 180) => request<DailyMetricPoint[]>(`/api/metrics?days=${days}`),
   steps: (days = 30) => request<DailyStepsPoint[]>(`/api/steps?days=${days}`),
   geocode: (lat: number, lon: number) => request<GeocodeResult>(`/api/geocode?lat=${lat}&lon=${lon}`),
 
