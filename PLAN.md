@@ -2119,6 +2119,62 @@ anything else in this phase if a cycling FTP is never set.
       and Daily Steps confirmed rescaling under the Week filter too.
 - [x] Commit: "Phase 6.2: PMC pipeline (CTL/ATL/TSB)"
 
+### 6.2.1 Chart interaction: pan/zoom, legends, fullscreen — done
+User-reported follow-up to 6.2: wanted to scroll each chart's visible time
+window left/right, clearer legends, and a way to focus on one chart for more
+detail. Initial plan was to extend the FilterBar's existing prev/next button
+navigation (currently only wired for rolling7/week mode) to every filter
+mode — user redirected this ("swipe or click/drag to scroll would work
+fine") toward direct chart interaction instead, which is both less work and
+a better fit for exploring *within* an already-loaded date range rather than
+re-fetching a shifted one.
+- [x] Installed `chartjs-plugin-zoom` (v2.2.0); registered globally via
+      `ChartJS.register(zoomPlugin)` in `chartTheme.ts`'s `applyChartTheme()`.
+      `npm audit` flagged 2 high-severity advisories after install — traced to
+      `react-router` (pre-existing, unrelated to this change), not fixed
+      inline; flagged separately via a spawned background task instead of
+      bundling an unrelated breaking downgrade into this pass.
+- [x] `CHART_PAN_ZOOM` (`chartTheme.ts`): drag/swipe pans the visible x-range,
+      scroll-wheel/pinch zooms, `limits: {x: {minRange: 2}}` floor. Spread
+      into `options.plugins.zoom` on every date-based time-series chart —
+      Training Load (PMC), Weekly Mileage, Pace/Cadence/HR Trend, Rolling
+      Pace, Daily Steps, Resting HR, VO2 Max, Sleep. Deliberately **not**
+      added to the scatter charts (temp-vs-pace/cadence/HR, cadence-vs-pace)
+      or the Sleep Stages hypnogram, since their x-axes aren't date ranges.
+      `ChartCanvas.tsx` gained a `dblclick` listener calling
+      `chart.resetZoom?.()` (optional-chained so it's a no-op on any chart
+      without the plugin's options set, safe to attach unconditionally).
+      Note: pan only has somewhere to go once zoomed in — with the default
+      view already showing the full loaded range, dragging is a no-op by
+      design (nothing exists past either edge to reveal); zoom-then-pan is
+      the real interaction. Verified live via a Playwright drag/wheel/
+      dblclick script comparing canvas screenshots before/after each action
+      (confirmed unzoomed pan is a no-op, zoomed pan changes pixels, wheel
+      zoom changes pixels, dblclick reset changes pixels back) — this is
+      genuine interaction verification, not just a "loads without error"
+      check, since the earlier tooling for this repo (`screenshot.py`) only
+      takes static screenshots.
+- [x] Legends: audited every multi-series chart. PMC and Sleep already had
+      real Chart.js legends; Pace/Cadence/HR Trend already had a manual JSX
+      legend row (kept as-is — it labels which axis Pace belongs to, which a
+      bare Chart.js legend wouldn't convey). Remaining charts are single-
+      series, where the panel title already identifies what's plotted — no
+      legend added, to avoid a redundant one-item legend on every card.
+- [x] Fullscreen: `ChartPanel.tsx` gained a `Maximize2` icon button (shown
+      whenever the panel has real data, not in its empty state) that opens a
+      `Dialog` reusing the exact same `children` at `max-w-4xl` instead of a
+      second, separately-maintained chart definition. Works because
+      `children` rendered a second time at a different tree position mounts
+      an independent `ChartCanvas`/Chart.js instance with its own canvas ref
+      — confirmed via Playwright (exactly 1 canvas inside the dialog, Escape
+      closes it, no console errors) and screenshotted at desktop + mobile.
+- [x] Verified: `tsc -b --noEmit`, `oxlint` (one pre-existing unrelated
+      warning, `web/src/components/ui/button.tsx`), `npm run build` all clean
+      after each round of changes; live-tested against the real production
+      backend via a throwaway `hale-web-dev-check` dev-server container,
+      torn down after verification.
+- [x] Commit: "Phase 6.2.1: chart pan/zoom, legend audit, fullscreen expand"
+
 ### 6.3 Gear tracking
 - [ ] `Gear` table (`id, user_id, name, kind shoe|bike|bike_component,
       parent_gear_id?, start_date, retired_date?, replace_at_mi?`) +

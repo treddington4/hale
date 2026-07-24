@@ -11,7 +11,7 @@ import { currentFilterRange, toDateInputValue, todayMidnight, addDays, type Filt
 import { FilterBar, type FilterState } from "@/components/activities/FilterBar"
 import { ChartPanel } from "@/components/insights/ChartPanel"
 import { ChartCanvas } from "@/components/insights/ChartCanvas"
-import { CHART_COLORS } from "@/lib/chartTheme"
+import { CHART_COLORS, CHART_PAN_ZOOM } from "@/lib/chartTheme"
 import {
   SLEEP_STAGE_ROWS,
   SLEEP_STAGE_KEY_TO_ROW,
@@ -234,7 +234,10 @@ export function InsightsPage() {
         ],
       },
       options: {
-        plugins: { legend: { display: true, position: "top", labels: { boxHeight: 8 } } },
+        plugins: {
+          legend: { display: true, position: "top", labels: { boxHeight: 8 } },
+          zoom: CHART_PAN_ZOOM,
+        },
         scales: {
           load: { type: "linear", position: "left", grid: { color: CHART_COLORS.grid } },
           tsb: { type: "linear", position: "right", grid: { display: false } },
@@ -253,7 +256,7 @@ export function InsightsPage() {
         datasets: [{ data: weeklyEntries.map(([, mi]) => +mi.toFixed(1)), backgroundColor: CHART_COLORS.cyan, borderRadius: 4 }],
       },
       options: {
-        plugins: { legend: { display: false } },
+        plugins: { legend: { display: false }, zoom: CHART_PAN_ZOOM },
         scales: { x: { grid: { display: false } }, y: { grid: { color: CHART_COLORS.grid } } },
       },
     }
@@ -295,7 +298,7 @@ export function InsightsPage() {
         ],
       },
       options: {
-        plugins: { legend: { display: false } },
+        plugins: { legend: { display: false }, zoom: CHART_PAN_ZOOM },
         scales: {
           pace: {
             type: "linear",
@@ -332,6 +335,7 @@ export function InsightsPage() {
         plugins: {
           legend: { display: false },
           tooltip: { callbacks: { label: (ctx) => paceStr((ctx.parsed.y as number) * 60) + "/mi" } },
+          zoom: CHART_PAN_ZOOM,
         },
         scales: {
           y: { reverse: true, ticks: { callback: (v) => paceStr(Number(v) * 60) }, grid: { color: CHART_COLORS.grid } },
@@ -377,7 +381,7 @@ export function InsightsPage() {
         datasets: [{ data: stepsData.map((d) => d.steps), backgroundColor: CHART_COLORS.green, borderRadius: 4 }],
       },
       options: {
-        plugins: { legend: { display: false } },
+        plugins: { legend: { display: false }, zoom: CHART_PAN_ZOOM },
         scales: { x: { grid: { display: false } }, y: { grid: { color: CHART_COLORS.grid } } },
       },
     }
@@ -392,7 +396,11 @@ export function InsightsPage() {
         datasets: [{ data: rhrData.map((d) => d.restingHrBpm), borderColor: CHART_COLORS.orange, backgroundColor: CHART_COLORS.orange, tension: 0.3 }],
       },
       options: {
-        plugins: { legend: { display: false }, tooltip: { callbacks: { label: (ctx) => `${ctx.parsed.y} bpm` } } },
+        plugins: {
+          legend: { display: false },
+          tooltip: { callbacks: { label: (ctx) => `${ctx.parsed.y} bpm` } },
+          zoom: CHART_PAN_ZOOM,
+        },
         scales: {
           x: { grid: { display: false } },
           y: { ticks: { callback: (v) => v + " bpm" }, grid: { color: CHART_COLORS.grid } },
@@ -410,7 +418,7 @@ export function InsightsPage() {
         datasets: [{ data: vo2Data.map((d) => d.vo2max), borderColor: CHART_COLORS.gold, backgroundColor: CHART_COLORS.gold, tension: 0.3, stepped: true }],
       },
       options: {
-        plugins: { legend: { display: false } },
+        plugins: { legend: { display: false }, zoom: CHART_PAN_ZOOM },
         scales: { x: { grid: { display: false } }, y: { grid: { color: CHART_COLORS.grid } } },
       },
     }
@@ -444,7 +452,7 @@ export function InsightsPage() {
         ],
       },
       options: {
-        plugins: { legend: { display: true, labels: { boxWidth: 10 } } },
+        plugins: { legend: { display: true, labels: { boxWidth: 10 } }, zoom: CHART_PAN_ZOOM },
         scales: {
           score: { type: "linear", position: "left", min: 0, max: 100, grid: { color: CHART_COLORS.grid } },
           hrs: { type: "linear", position: "right", min: 0, grid: { display: false } },

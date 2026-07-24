@@ -7,6 +7,7 @@
 // first). Calling applyChartTheme() once at app startup (see main.tsx) fixes
 // that ordering fragility instead of reproducing it.
 import { Chart as ChartJS } from "chart.js/auto"
+import zoomPlugin from "chartjs-plugin-zoom"
 
 export const CHART_COLORS = {
   gold: "#FFC857",
@@ -24,5 +25,21 @@ export function applyChartTheme() {
   if (applied) return
   ChartJS.defaults.color = CHART_COLORS.muted
   ChartJS.defaults.borderColor = CHART_COLORS.grid
+  ChartJS.register(zoomPlugin)
   applied = true
+}
+
+// Drag (mouse) / swipe (touch) to pan the visible x-range, scroll-wheel/pinch to
+// zoom — layered on top of whatever date range the FilterBar already fetched, so
+// this is fine-grained exploration *within* the loaded window, not an infinite-
+// history fetch-on-pan (which would need a much bigger data-loading redesign).
+// Spread into any time-series chart's `options.plugins.zoom`.
+export const CHART_PAN_ZOOM = {
+  pan: { enabled: true, mode: "x" as const },
+  zoom: {
+    wheel: { enabled: true },
+    pinch: { enabled: true },
+    mode: "x" as const,
+  },
+  limits: { x: { minRange: 2 } },
 }

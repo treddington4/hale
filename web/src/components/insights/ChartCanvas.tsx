@@ -13,7 +13,17 @@ export function ChartCanvas({ config, height = 200 }: { config: ChartConfigurati
   useEffect(() => {
     if (!ref.current) return
     const chart = new Chart(ref.current, config)
-    return () => chart.destroy()
+    // Double-click resets pan/zoom (chartjs-plugin-zoom, see chartTheme.ts's
+    // CHART_PAN_ZOOM) — a no-op via optional chaining on charts that don't have
+    // the zoom plugin's options set, so this is safe to attach unconditionally
+    // rather than needing every caller to wire it up individually.
+    const canvas = ref.current
+    const resetZoom = () => chart.resetZoom?.()
+    canvas.addEventListener("dblclick", resetZoom)
+    return () => {
+      canvas.removeEventListener("dblclick", resetZoom)
+      chart.destroy()
+    }
   }, [config])
 
   return (
