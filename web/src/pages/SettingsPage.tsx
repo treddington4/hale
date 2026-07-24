@@ -98,7 +98,7 @@ function GarminSection() {
   const { data: syncMeta } = useSyncMeta()
   const { data: routeDiag } = useRouteDiagnostics()
   const { data: config } = useConfig()
-  const { data: recentSteps } = useSteps(7)
+  const { data: recentSteps } = useSteps({ days: 7 })
   const latestSteps = recentSteps?.length ? recentSteps[recentSteps.length - 1] : null
 
   const routeDiagTotal = routeDiag ? routeDiag.fit_record_stream + routeDiag.geopolyline_summary + routeDiag.none : 0

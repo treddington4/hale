@@ -75,13 +75,20 @@ export function InsightsPage() {
   const [selectedNight, setSelectedNight] = useState<string | undefined>(undefined)
 
   const { start, end } = currentFilterRange(filter.mode, filter.anchor, filter.customStart, filter.customEnd)
-  const runsQuery = useRuns(
-    filter.mode === "all" ? { all: true } : { start: toDateInputValue(start), end: toDateInputValue(end) },
-  )
+  // Shared by every filter-driven chart on this page — previously only
+  // runsQuery (and the charts built on it: Temperature's Effect, Weekly
+  // Mileage, Pace/Cadence/HR Trend, Cadence vs Pace) actually responded to the
+  // FilterBar; Daily Steps/Resting HR/VO2 Max/Sleep/Training Load silently kept
+  // a fixed trailing window regardless of what the user picked (a real,
+  // user-reported gap).
+  const rangeQuery = filter.mode === "all"
+    ? { all: true }
+    : { start: toDateInputValue(start), end: toDateInputValue(end) }
+  const runsQuery = useRuns(rangeQuery)
   const allRunsQuery = useAllRuns()
-  const metricsQuery = useMetrics(180)
-  const wellnessQuery = useWellness(90)
-  const stepsQuery = useSteps(30)
+  const metricsQuery = useMetrics(rangeQuery)
+  const wellnessQuery = useWellness(rangeQuery)
+  const stepsQuery = useSteps(rangeQuery)
   const sleepStagesQuery = useSleepStages(selectedNight)
   const hrFloor = useHrFloor()
 
@@ -581,7 +588,7 @@ export function InsightsPage() {
 
           <ChartPanel
             title="Daily Steps"
-            sub="Garmin wellness data, last 30 days"
+            sub="Garmin wellness data"
             empty={!stepsConfig ? "No step data synced yet (Garmin-only)." : null}
           >
             {stepsConfig && <ChartCanvas config={stepsConfig} height={140} />}
@@ -589,7 +596,7 @@ export function InsightsPage() {
 
           <ChartPanel
             title="Resting Heart Rate"
-            sub="Garmin wellness data, last 90 days"
+            sub="Garmin wellness data"
             empty={!rhrConfig ? "No resting HR data synced yet (Garmin-only)." : null}
           >
             {rhrConfig && <ChartCanvas config={rhrConfig} height={140} />}
@@ -597,7 +604,7 @@ export function InsightsPage() {
 
           <ChartPanel
             title="VO2 Max"
-            sub="Garmin wellness data, last 90 days — updates periodically, not every day"
+            sub="Garmin wellness data — updates periodically, not every day"
             empty={!vo2Config ? "No VO2 max data synced yet (Garmin-only)." : null}
           >
             {vo2Config && <ChartCanvas config={vo2Config} height={140} />}
@@ -605,7 +612,7 @@ export function InsightsPage() {
 
           <ChartPanel
             title="Sleep"
-            sub="Sleep score and total duration, last 90 days"
+            sub="Sleep score and total duration"
             empty={!sleepConfig ? "No sleep data synced yet (Garmin-only)." : null}
           >
             {sleepConfig && <ChartCanvas config={sleepConfig} height={160} />}

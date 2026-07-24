@@ -2082,15 +2082,41 @@ anything else in this phase if a cycling FTP is never set.
       chart — CTL/ATL as lines, TSB as a bar colored per-bar (green = fresh,
       orange = fatigued), placed as the first/most prominent panel on Insights.
       This was the actual visual-impact payoff the phase was picked for.
-- [x] Verify: ran the real pipeline against production (1476 days of history —
-      the account's actual sync history goes back years). Real values look
-      exactly as expected for a consistently-trained runner: CTL steady in the
-      mid-80s, ATL swinging 40-90 with recent training intensity, TSB flipping
-      positive after rest days. Confirmed via screenshot at desktop + mobile
-      (an initial mobile "empty" render turned out to be the dev screenshot
-      tool's fixed 800ms wait being too short for this page's now-larger set of
-      concurrent chart queries, not a real bug — a `networkidle`-waited retest
-      rendered identically to desktop).
+- [x] Verify: ran the real pipeline against production. The DB's earliest Run
+      row is from 2022, so the raw recursion spans 1476 days — but real,
+      continuous training is only ~13 months (Jul 2025–Jul 2026); a short 2022
+      burst (40 runs) is separated from it by a ~2.75-year dead gap with zero
+      activity. Worth noting explicitly since an early description of this
+      verification overstated it as "the account's actual sync history goes
+      back years" in a way that implied years of meaningful data — corrected
+      after the user directly questioned it. The math itself isn't affected
+      (a multi-year zero-load gap just decays CTL/ATL to 0 well before real
+      training resumes), and the default chart view never showed the gap in
+      the first place (see the 180-day-window note below, since superseded).
+      Real values for the actual training period look exactly as expected for
+      a consistently-trained runner: CTL climbing from ~20 to ~90 over the
+      year, ATL swinging with training intensity, TSB flipping positive after
+      rest. Confirmed via screenshot at desktop + mobile (an initial mobile
+      "empty" render turned out to be the dev screenshot tool's fixed 800ms
+      wait being too short for this page's larger concurrent-query set, not a
+      real bug — a `networkidle`-waited retest rendered identically to desktop).
+- [x] **Follow-up fix (user-reported)**: the new chart didn't respond to
+      Insights' shared FilterBar timescale control at all — turned out neither
+      did Daily Steps/Resting HR/VO2 Max/Sleep, a pre-existing gap the new
+      chart just added a second instance of. Root cause: `/api/steps`,
+      `/api/wellness`, and the new `/api/metrics` only ever accepted a fixed
+      trailing `days=N` window, unlike `/api/runs` which already supported a
+      real `start`/`end`/`all` range. Added the same `start`/`end`/`all`
+      precedence to all three endpoints (shared `_apply_date_range` helper),
+      and wired `useSteps`/`useWellness`/`useMetrics` to accept a query object
+      instead of a bare day-count so `InsightsPage.tsx` could pass the same
+      filter-derived range to every chart — `HomePage.tsx`/`SettingsPage.tsx`'s
+      existing fixed-window calls (`{days: 30}`/`{days: 7}`) were updated to
+      the new call shape but keep their original fixed behavior, since those
+      aren't driven by any filter. Verified live: 7 Days/Year/All all now
+      visibly rescale the Training Load chart correctly (All even shows the
+      real 2022-burst → dead-gap → 2025-2026-buildup story described above),
+      and Daily Steps confirmed rescaling under the Week filter too.
 - [x] Commit: "Phase 6.2: PMC pipeline (CTL/ATL/TSB)"
 
 ### 6.3 Gear tracking

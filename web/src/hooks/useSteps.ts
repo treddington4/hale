@@ -1,6 +1,6 @@
 import { useQuery } from "@tanstack/react-query"
-import { api } from "@/lib/api"
+import { api, type RunsQuery } from "@/lib/api"
 
-export function useSteps(days = 30) {
-  return useQuery({ queryKey: ["steps", days], queryFn: () => api.steps(days) })
+export function useSteps(query: RunsQuery & { days?: number } = { days: 30 }) {
+  return useQuery({ queryKey: ["steps", query], queryFn: () => api.steps(query) })
 }

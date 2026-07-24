@@ -618,9 +618,33 @@ export const api = {
     const qs = params.toString()
     return request<Run[]>(`/api/runs${qs ? `?${qs}` : ""}`)
   },
-  wellness: (days = 30) => request<WellnessDay[]>(`/api/wellness?days=${days}`),
-  metrics: (days = 180) => request<DailyMetricPoint[]>(`/api/metrics?days=${days}`),
-  steps: (days = 30) => request<DailyStepsPoint[]>(`/api/steps?days=${days}`),
+  wellness: (query: RunsQuery & { days?: number } = {}) => {
+    const params = new URLSearchParams()
+    if (query.all) params.set("all", "true")
+    if (query.start) params.set("start", query.start)
+    if (query.end) params.set("end", query.end)
+    if (query.days != null) params.set("days", String(query.days))
+    const qs = params.toString()
+    return request<WellnessDay[]>(`/api/wellness${qs ? `?${qs}` : ""}`)
+  },
+  metrics: (query: RunsQuery & { days?: number } = {}) => {
+    const params = new URLSearchParams()
+    if (query.all) params.set("all", "true")
+    if (query.start) params.set("start", query.start)
+    if (query.end) params.set("end", query.end)
+    if (query.days != null) params.set("days", String(query.days))
+    const qs = params.toString()
+    return request<DailyMetricPoint[]>(`/api/metrics${qs ? `?${qs}` : ""}`)
+  },
+  steps: (query: RunsQuery & { days?: number } = {}) => {
+    const params = new URLSearchParams()
+    if (query.all) params.set("all", "true")
+    if (query.start) params.set("start", query.start)
+    if (query.end) params.set("end", query.end)
+    if (query.days != null) params.set("days", String(query.days))
+    const qs = params.toString()
+    return request<DailyStepsPoint[]>(`/api/steps${qs ? `?${qs}` : ""}`)
+  },
   geocode: (lat: number, lon: number) => request<GeocodeResult>(`/api/geocode?lat=${lat}&lon=${lon}`),
 
   chatStatus: () => request<ChatStatus>("/api/chat/status"),

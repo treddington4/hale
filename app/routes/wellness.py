@@ -11,14 +11,35 @@ from ..util import local_today
 router = APIRouter()
 
 
+# start/end/all take precedence over `days` when given — same precedence as
+# GET /api/runs. Added so Insights' shared FilterBar can actually drive every
+# chart on the page: Steps/Wellness/Metrics previously only ever accepted a
+# fixed trailing-day count, so changing the filter silently did nothing for the
+# charts backed by them (a real, user-reported gap — Temperature's Effect/Weekly
+# Mileage/etc respond because they're backed by /api/runs, which already had
+# this; Daily Steps/Resting HR/VO2 Max/Sleep/Training Load didn't).
+def _apply_date_range(q, date_column, days: int, start: str | None, end: str | None, all_time: bool):
+    if all_time:
+        return q
+    if not start and not end:
+        cutoff = (datetime.now(timezone.utc) - timedelta(days=days)).strftime("%Y-%m-%d")
+        return q.filter(date_column >= cutoff)
+    if start:
+        q = q.filter(date_column >= start)
+    if end:
+        q = q.filter(date_column <= end)
+    return q
+
+
 # ---------- Daily steps (Garmin-only) ----------
 @router.get("/api/steps")
-def get_steps(days: int = 30, user_id: str = Depends(auth.current_user_id)):
-    cutoff = (datetime.now(timezone.utc) - timedelta(days=days)).strftime("%Y-%m-%d")
+def get_steps(days: int = 30, start: str = None, end: str = None, all_time: bool = Query(False, alias="all"),
+              user_id: str = Depends(auth.current_user_id)):
     db = SessionLocal()
     try:
-        rows = (db.query(DailySteps).filter(DailySteps.date >= cutoff)
-                .filter(owned_by(DailySteps.user_id, user_id)).order_by(DailySteps.date).all())
+        q = db.query(DailySteps).filter(owned_by(DailySteps.user_id, user_id))
+        q = _apply_date_range(q, DailySteps.date, days, start, end, all_time)
+        rows = q.order_by(DailySteps.date).all()
         return [{"date": r.date, "steps": r.steps} for r in rows]
     finally:
         db.close()
@@ -26,12 +47,13 @@ def get_steps(days: int = 30, user_id: str = Depends(auth.current_user_id)):
 
 # ---------- Phase 6.2: PMC (fitness/fatigue/form) daily metrics ----------
 @router.get("/api/metrics")
-def get_metrics(days: int = 180, user_id: str = Depends(auth.current_user_id)):
-    cutoff = (datetime.now(timezone.utc) - timedelta(days=days)).strftime("%Y-%m-%d")
+def get_metrics(days: int = 180, start: str = None, end: str = None, all_time: bool = Query(False, alias="all"),
+                 user_id: str = Depends(auth.current_user_id)):
     db = SessionLocal()
     try:
-        rows = (db.query(DailyMetrics).filter(DailyMetrics.date >= cutoff)
-                .filter(owned_by(DailyMetrics.user_id, user_id)).order_by(DailyMetrics.date).all())
+        q = db.query(DailyMetrics).filter(owned_by(DailyMetrics.user_id, user_id))
+        q = _apply_date_range(q, DailyMetrics.date, days, start, end, all_time)
+        rows = q.order_by(DailyMetrics.date).all()
         return [
             {"date": r.date, "dailyLoad": r.daily_load, "ctl": r.ctl, "atl": r.atl, "tsb": r.tsb}
             for r in rows
@@ -42,12 +64,13 @@ def get_metrics(days: int = 180, user_id: str = Depends(auth.current_user_id)):
 
 # ---------- Wellness: resting HR / VO2max / sleep (Garmin-only) ----------
 @router.get("/api/wellness")
-def get_wellness(days: int = 90, user_id: str = Depends(auth.current_user_id)):
-    cutoff = (datetime.now(timezone.utc) - timedelta(days=days)).strftime("%Y-%m-%d")
+def get_wellness(days: int = 90, start: str = None, end: str = None, all_time: bool = Query(False, alias="all"),
+                  user_id: str = Depends(auth.current_user_id)):
     db = SessionLocal()
     try:
-        rows = (db.query(DailySteps).filter(DailySteps.date >= cutoff)
-                .filter(owned_by(DailySteps.user_id, user_id)).order_by(DailySteps.date).all())
+        q = db.query(DailySteps).filter(owned_by(DailySteps.user_id, user_id))
+        q = _apply_date_range(q, DailySteps.date, days, start, end, all_time)
+        rows = q.order_by(DailySteps.date).all()
         return [{
             "date": r.date,
             "restingHrBpm": r.resting_hr_bpm,

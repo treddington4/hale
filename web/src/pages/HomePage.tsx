@@ -199,7 +199,7 @@ export function DashboardCards() {
 }
 
 function WellnessCards() {
-  const { data } = useWellness(30)
+  const { data } = useWellness({ days: 30 })
   const navigate = useNavigate()
   if (!data) return null
 
