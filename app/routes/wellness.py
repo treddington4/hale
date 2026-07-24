@@ -92,6 +92,7 @@ def _run_to_dict(r: Run):
         "verticalOscillationMm": r.vertical_oscillation_mm, "groundContactTimeMs": r.ground_contact_time_ms,
         "verticalRatioPct": r.vertical_ratio_pct, "strideLengthM": r.stride_length_m, "avgPowerWatts": r.avg_power_watts,
         "exerciseSets": json.loads(r.exercise_sets_json) if r.exercise_sets_json else None,
+        "tss": r.tss, "efficiencyFactor": r.efficiency_factor,
     }
 
 

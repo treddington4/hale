@@ -92,6 +92,13 @@ class Run(Base):
     stride_length_m = Column(Float, nullable=True)
     avg_power_watts = Column(Float, nullable=True)
 
+    # Phase 6.1 — computed once at sync time (see util.compute_tss/
+    # compute_efficiency_factor), same "stored, not recomputed on read" discipline
+    # as GAP/run-type elsewhere. tss: hrTSS when avg_hr + a real threshold_hr exist,
+    # else a fallback using suggested_type's fixed intensity-factor bucket.
+    tss = Column(Float, nullable=True)
+    efficiency_factor = Column(Float, nullable=True)
+
 
 class DailySteps(Base):
     """Garmin-only daily step count. Unlike Run rows (one per activity), this is one row

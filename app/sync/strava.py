@@ -6,9 +6,9 @@ import bisect
 import requests
 from datetime import datetime, timezone
 
-from ..models import SessionLocal, Run, ProviderCredential, run_needs_detail_sync, resolve_run_id
+from ..models import SessionLocal, Run, ProviderCredential, UserTrainingConfig, run_needs_detail_sync, resolve_run_id
 from .weather import get_historical_weather
-from ..util import gap_sec_per_mi, classify_run_type, detect_intervals, decode_polyline
+from ..util import gap_sec_per_mi, classify_run_type, detect_intervals, decode_polyline, compute_tss, compute_efficiency_factor
 
 # STRAVA_CLIENT_ID/SECRET are the OAuth *application's* credentials (registered once per
 # self-hosted deployment at strava.com) — infrastructure config, not a per-user secret.
@@ -337,6 +337,12 @@ def _process_activity(act: dict, headers: dict, db, user_id: str) -> bool:
     run.route_json = json.dumps(decode_polyline((act.get("map") or {}).get("summary_polyline")))
     run.route_metrics_json = json.dumps(route_metrics)
     run.detail_synced_at = datetime.now(timezone.utc).isoformat()
+
+    # Phase 6.1 — computed once at sync time, same discipline as GAP/run-type above.
+    training_config = db.get(UserTrainingConfig, user_id)
+    threshold_hr = training_config.threshold_hr if training_config else None
+    run.tss = compute_tss(run.moving_time_sec, run.avg_hr, threshold_hr, run.suggested_type)
+    run.efficiency_factor = compute_efficiency_factor(run.avg_pace_sec_per_mi, run.avg_hr)
 
     db.merge(run)
     return True

@@ -111,6 +111,43 @@ def classify_run_type(distance_mi, avg_pace_sec_per_mi, splits, avg_hr=None):
     return "Easy"
 
 
+# Phase 6.1 — fixed intensity-factor-squared-style estimate per classify_run_type
+# bucket, used only when a real threshold_hr isn't available (see compute_tss).
+# Same duration * IF^2 * 100 shape as real hrTSS, just with a documented fixed IF
+# per bucket instead of one computed from actual HR-vs-threshold data.
+FALLBACK_INTENSITY_FACTOR = {
+    "Recovery": 0.60, "Easy": 0.70, "Tempo": 0.85, "Interval": 0.95, "Long Run": 0.75,
+}
+
+
+def compute_tss(moving_time_sec, avg_hr=None, threshold_hr=None, suggested_type=None) -> float | None:
+    """hrTSS (`duration_hr * (avg_hr/threshold_hr)^2 * 100`, the standard
+    TrainingPeaks-style formula) when both a real avg_hr and threshold_hr exist;
+    otherwise falls back to the same duration*(IF^2)*100 shape using a fixed
+    intensity factor per classify_run_type bucket (FALLBACK_INTENSITY_FACTOR) — a
+    documented v1 approximation, not a full grade-adjusted-pace TSS model."""
+    if not moving_time_sec:
+        return None
+    duration_hr = moving_time_sec / 3600
+    if avg_hr and threshold_hr:
+        return round(duration_hr * (avg_hr / threshold_hr) ** 2 * 100, 1)
+    intensity_factor = FALLBACK_INTENSITY_FACTOR.get(suggested_type)
+    if intensity_factor is None:
+        return None
+    return round(duration_hr * (intensity_factor ** 2) * 100, 1)
+
+
+def compute_efficiency_factor(avg_pace_sec_per_mi, avg_hr) -> float | None:
+    """Aerobic efficiency: speed (mph) per heartbeat — a classic "same effort,
+    faster over time" fitness-trend metric, independent of any threshold value
+    (unlike compute_tss) so it's available for every run with pace + HR regardless
+    of whether threshold_hr has ever been set."""
+    if not avg_pace_sec_per_mi or not avg_hr:
+        return None
+    speed_mph = 3600 / avg_pace_sec_per_mi
+    return round(speed_mph / avg_hr, 4)
+
+
 def detect_intervals(laps):
     """
     Given raw Strava/Garmin laps (list of dicts with duration_sec, distance_mi, pace_sec_per_mi, ...),

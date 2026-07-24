@@ -21,6 +21,7 @@ from ..models import (
     Run,
     DailySteps,
     ProviderCredential,
+    UserTrainingConfig,
     get_sync_meta,
     set_sync_meta,
     run_needs_detail_sync,
@@ -29,7 +30,7 @@ from ..models import (
     user_key,
 )
 from .weather import get_historical_weather
-from ..util import classify_run_type, detect_intervals, local_today
+from ..util import classify_run_type, detect_intervals, local_today, compute_tss, compute_efficiency_factor
 
 log = logging.getLogger("runlog")
 
@@ -313,6 +314,39 @@ def _lightweight_session_check(client, token_store: str) -> bool:
     except Exception as e:
         log.debug(f"garmin login: lightweight session check unavailable ({e})")
         return False
+
+
+def _maybe_populate_threshold_hr(client, user_id: str):
+    """Phase 6.1 — auto-fills UserTrainingConfig.threshold_hr from Garmin's own
+    lactate-threshold estimate (get_lactate_threshold(), already available in the
+    pinned garminconnect version, no extra OAuth scope needed) the first time a
+    sync runs after it's been left unset. Never overwrites a value already there
+    (auto-populated before, or entered manually in Settings) — only ever sets it
+    from None. Best-effort: any failure (network, unexpected response shape, no
+    LTHR estimate yet from Garmin) is swallowed, matching steps/adaptive-plan's
+    own degrade-to-no-op pattern, since this is a nice-to-have, not required for
+    the sync itself to succeed."""
+    db = SessionLocal()
+    try:
+        config = db.get(UserTrainingConfig, user_id)
+        if config and config.threshold_hr:
+            return
+        data = client.get_lactate_threshold(latest=True)
+        hr = (data.get("speed_and_heart_rate") or {}).get("heartRate")
+        if not hr:
+            return
+        if not config:
+            config = UserTrainingConfig(
+                user_id=user_id, weekly_ramp_pct=3.0, mesocycle_pattern="3:1", distribution="pyramidal",
+                strength_days_per_week=2, strength_template="full_body_ab",
+            )
+            db.add(config)
+        config.threshold_hr = round(hr)
+        db.commit()
+    except Exception as e:
+        log.debug(f"garmin threshold HR auto-populate skipped/failed: {e}")
+    finally:
+        db.close()
 
 
 def _sync_daily_steps(client, user_id: str, days: int = 30) -> int:
@@ -1069,6 +1103,12 @@ def _process_activity(act: dict, client, db, user_id: str) -> bool:
     run.exercise_sets_json = json.dumps(exercise_sets) if exercise_sets else None
     run.detail_synced_at = datetime.now(timezone.utc).isoformat()
 
+    # Phase 6.1 — computed once at sync time, same discipline as GAP/run-type above.
+    training_config = db.get(UserTrainingConfig, user_id)
+    threshold_hr = training_config.threshold_hr if training_config else None
+    run.tss = compute_tss(run.moving_time_sec, run.avg_hr, threshold_hr, run.suggested_type)
+    run.efficiency_factor = compute_efficiency_factor(run.avg_pace_sec_per_mi, run.avg_hr)
+
     db.merge(run)
     return True
 
@@ -1178,6 +1218,12 @@ def sync_garmin_activities(user_id: str, limit: int = 10, progress_cb=None):
     steps = _sync_daily_steps(client, user_id)
     if progress_cb and steps:
         progress_cb(f"Synced {steps} days of step data")
+
+    # Same "cheap, independent, before the activity loop" reasoning as steps above —
+    # runs (and no-ops) on every quick sync until threshold_hr is actually set, so
+    # this activity batch's own TSS calc below can benefit from it immediately
+    # rather than waiting for a second sync.
+    _maybe_populate_threshold_hr(client, user_id)
 
     # Adaptive-plan suggested workouts, if any — cheap (2 calls total, not per-day) and
     # independent, same reasoning as steps above. Garmin can revise a suggestion right

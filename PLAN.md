@@ -2018,33 +2018,44 @@ down to opportunistic-only** — computed for a Ride only when it has real
 `avg_power_watts`, no attempt to derive/estimate power from pace, and not blocking
 anything else in this phase if a cycling FTP is never set.
 
-### 6.1 Per-activity metrics (sync-time, stored on Run)
-- [ ] **Auto-populate threshold HR from Garmin**: during `garmin_sync.py`'s sync
-      flow (or a small standalone one-shot call, whichever fits the existing sync
-      structure better at implementation time), call `get_lactate_threshold()` and,
-      **only if `UserTrainingConfig.threshold_hr` is currently null**, set it from
-      the response's running heart rate value. Never overwrites a value the user
-      already set manually in Settings.
-- [ ] `tss` column on `Run`: hrTSS (`(duration_hr * avg_hr_relative_to_threshold^2) * 100`
-      pattern, standard TrainingPeaks-style formula) when both `avg_hr` and a real
-      `threshold_hr` exist; otherwise a simpler fallback using the existing
-      `classify_run_type` heuristic's easy/tempo/interval/long bucket as a fixed
-      per-type intensity factor against duration (documented v1 approximation, not
-      a full grade-adjusted-pace TSS model — avoids inventing a second unverified
-      "threshold pace" reference given the Garmin speed field's unreliability noted
-      above). `efficiency_factor` (avg pace or power / avg HR) wherever HR exists.
-- [ ] For rides with real `avg_power_watts`: `normalized_power` (30s rolling
-      4th-power mean from streams, where available), `intensity_factor` (needs a
-      cycling FTP — from `UserTrainingConfig.ftp_watts` if the user has set it,
-      otherwise skipped, not estimated), `variability_index`, `aerobic_decoupling`.
-- [ ] Backfill command for existing activities (one-shot, container-run) — all 530
-      real runs, so the PMC chart has real historical depth from day one rather
-      than starting from a flat line.
-- [ ] Verify: hand-check the hrTSS formula against a couple of real runs with known
-      HR/duration before backfilling everything; confirm the Garmin auto-populate
-      step doesn't fire (and doesn't overwrite) once threshold_hr is already set.
-- [ ] Commit: "Phase 6.1: per-activity TSS/EF (+ NP/IF/VI/decoupling where power
-      exists) + Garmin LTHR auto-populate"
+### 6.1 Per-activity metrics (sync-time, stored on Run) — done
+- [x] **Auto-populate threshold HR from Garmin**: `_maybe_populate_threshold_hr()`
+      in `garmin_sync.py`, called at the top of `sync_garmin_activities` (before
+      the activity loop, same "cheap and independent" placement as steps/adaptive-
+      plan). Calls `get_lactate_threshold()` and, only if `UserTrainingConfig.
+      threshold_hr` is null, sets it from the response's running heart rate.
+      Verified live against the real account: correctly set threshold_hr=173 on
+      first run; a second run with threshold_hr manually forced to a different
+      value (999) confirmed it does NOT get overwritten.
+- [x] `tss`/`efficiency_factor` columns on `Run` (`util.compute_tss`/
+      `compute_efficiency_factor`) — hrTSS when both `avg_hr` and a real
+      `threshold_hr` exist, else `FALLBACK_INTENSITY_FACTOR`'s fixed per-
+      `suggested_type`-bucket estimate (documented v1 approximation, not a full
+      grade-adjusted-pace model — the Garmin endpoint's paired "speed" field
+      looked unreliable during scoping, so no second threshold-pace reference was
+      built on top of it). `efficiency_factor` = speed_mph / avg_hr, independent of
+      threshold_hr so it's available for every run with pace + HR regardless.
+      Threaded into both `strava.py` and `garmin_sync.py`'s `_process_activity`.
+- [ ] ~~NP/IF/VI/aerobic-decoupling for rides with power~~ — **dropped, not just
+      deferred**: checked real data before building this — 136/530 runs have
+      `avg_power_watts`, and *all 136 are Run-type activities* (Garmin's running-
+      power estimate), not a single real Ride has power data. Building cycling-
+      specific NP/IF machinery for zero real rides would be speculative,
+      unused code; revisit only if a real power-meter-equipped ride ever syncs.
+- [x] Backfill: `stats.backfill_run_metrics(db, user_id)` — recomputes from
+      current `threshold_hr` (re-runnable any time it changes, not a one-time-only
+      migration). Run for real against production: 530/530 runs backfilled,
+      485 got a real tss value (461 hrTSS + a handful of fallback-bucket matches),
+      378 got efficiency_factor.
+- [x] Verify: hand-checked hrTSS's formula against real backfilled runs — e.g. a
+      55min run at avg HR 151 (threshold 173) → tss≈70, matching
+      `duration_hr(0.917) * (151/173)²(0.763) * 100` by hand; a 63.5min "Interval"
+      run with no HR → tss≈95.5 via the fallback path,
+      `1.058 * 0.95² * 100`, also matching by hand. Caught and fixed a real gap
+      during verification: `_run_to_dict` (routes/wellness.py) didn't expose
+      `tss`/`efficiencyFactor` in `GET /api/runs` at all — the DB values were
+      correct but invisible via the API until this was added.
+- [x] Commit: "Phase 6.1: per-run TSS/EF + Garmin LTHR auto-populate"
 
 ### 6.2 PMC pipeline
 - [ ] `DailyMetrics` table: `(user_id, date) PK, trimp, ctl, atl, tsb,

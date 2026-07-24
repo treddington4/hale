@@ -17,10 +17,10 @@ from datetime import datetime, timedelta, timezone
 from sqlalchemy import func
 
 from .models import (
-    Run, DailySteps, Goal, DEFAULT_USER_ID, owned_by,
+    Run, DailySteps, Goal, UserTrainingConfig, DEFAULT_USER_ID, owned_by,
     SessionLocal, get_sync_meta, set_sync_meta, user_key,
 )
-from .util import local_today
+from .util import local_today, compute_tss, compute_efficiency_factor
 
 log = logging.getLogger("runlog")
 
@@ -687,3 +687,23 @@ def record_sync(source: str, user_id: str, count: int = None, error: str = None)
         set_sync_meta(user_key(user_id, f"{source}_last_count"), str(count))
     set_sync_meta(user_key(user_id, f"{source}_last_error"), error or "")
     refresh_dashboard_cache(user_id)
+
+
+def backfill_run_metrics(db, user_id: str = DEFAULT_USER_ID) -> int:
+    """Phase 6.1 — recomputes tss/efficiency_factor for every existing Run using the
+    user's *current* threshold_hr, not just newly-synced ones (strava.py/
+    garmin_sync.py's _process_activity only sets these at sync time going forward).
+    One-shot, container-run: `docker exec <container> python3 -c "from app.models
+    import SessionLocal; from app.stats import backfill_run_metrics; db =
+    SessionLocal(); print(backfill_run_metrics(db)); db.close()"`. Re-running later
+    (e.g. once threshold_hr gets set, auto or manually) upgrades every past run
+    from the fallback estimate to real hrTSS — safe to run repeatedly, since it
+    always recomputes from source fields rather than incrementally adjusting."""
+    config = db.get(UserTrainingConfig, user_id)
+    threshold_hr = config.threshold_hr if config else None
+    runs = db.query(Run).filter(owned_by(Run.user_id, user_id)).all()
+    for r in runs:
+        r.tss = compute_tss(r.moving_time_sec, r.avg_hr, threshold_hr, r.suggested_type)
+        r.efficiency_factor = compute_efficiency_factor(r.avg_pace_sec_per_mi, r.avg_hr)
+    db.commit()
+    return len(runs)
