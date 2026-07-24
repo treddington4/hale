@@ -1990,12 +1990,61 @@ nothing-was-written.
 
 ## Phase 6 — Training-load analytics
 
+Picked as the next feature specifically for visual impact (user's own framing) —
+a PMC (fitness/fatigue/form) chart is the centerpiece; gear tracking (6.3) was
+bundled in on request even though it isn't itself a training-load/visual feature.
+
+**Real finding that shapes 6.1's design**: this account's `UserTrainingConfig` has
+`thresholdHr`/`maxHr` both null (confirmed via `GET /api/training-config`), which
+would normally block hrTSS entirely. But `garminconnect.Garmin.get_lactate_threshold()`
+— already available in the pinned `garminconnect` version, no new OAuth scope,
+purely read-only — returned **real, genuine data for this account**: running LTHR
+173 bpm (estimated 2026-06-30, cycling 172 bpm), confirmed by an actual authenticated
+call during scoping, not assumed. The endpoint's paired "speed" field (0.347, units
+unclear — converts to an implausible ~1.2 km/h) looks unreliable and is **not** used;
+only the heart-rate values are trusted. This means hrTSS can be the primary metric
+from day one via an **auto-populate-if-unset** step (never silently overwrites a
+value the user has manually entered in Settings' existing Threshold HR field),
+rather than requiring the user to fill it in first or falling back to a fully
+pace-based rTSS formula for every run.
+
+Real data coverage checked before designing the fallback: 461/530 runs (87%) have
+`avg_hr`; only 136/530 have `avg_power_watts`, and those that do mix real cycling
+power with Garmin's running-power estimates (confirmed via `get_lactate_threshold`'s
+paired power query being sport-scoped to `RUNNING` specifically — a running "FTP"
+of 357W is not a cycling FTP and the two aren't interchangeable). Given this, NP/IF/
+variability-index/aerobic-decoupling (the power-based ride metrics) are **scoped
+down to opportunistic-only** — computed for a Ride only when it has real
+`avg_power_watts`, no attempt to derive/estimate power from pace, and not blocking
+anything else in this phase if a cycling FTP is never set.
+
 ### 6.1 Per-activity metrics (sync-time, stored on Run)
-- [ ] `tss` (hrTSS from avg HR vs threshold_hr; fallback rTSS from existing GAP),
-      `efficiency_factor`; rides with power: `normalized_power` (30s rolling 4th-power
-      mean), `intensity_factor`, `variability_index`, `aerobic_decoupling`
-- [ ] Backfill command for existing activities (one-shot, container-run)
-- [ ] Commit: "Phase 6.1: per-activity TSS/NP/EF/decoupling"
+- [ ] **Auto-populate threshold HR from Garmin**: during `garmin_sync.py`'s sync
+      flow (or a small standalone one-shot call, whichever fits the existing sync
+      structure better at implementation time), call `get_lactate_threshold()` and,
+      **only if `UserTrainingConfig.threshold_hr` is currently null**, set it from
+      the response's running heart rate value. Never overwrites a value the user
+      already set manually in Settings.
+- [ ] `tss` column on `Run`: hrTSS (`(duration_hr * avg_hr_relative_to_threshold^2) * 100`
+      pattern, standard TrainingPeaks-style formula) when both `avg_hr` and a real
+      `threshold_hr` exist; otherwise a simpler fallback using the existing
+      `classify_run_type` heuristic's easy/tempo/interval/long bucket as a fixed
+      per-type intensity factor against duration (documented v1 approximation, not
+      a full grade-adjusted-pace TSS model — avoids inventing a second unverified
+      "threshold pace" reference given the Garmin speed field's unreliability noted
+      above). `efficiency_factor` (avg pace or power / avg HR) wherever HR exists.
+- [ ] For rides with real `avg_power_watts`: `normalized_power` (30s rolling
+      4th-power mean from streams, where available), `intensity_factor` (needs a
+      cycling FTP — from `UserTrainingConfig.ftp_watts` if the user has set it,
+      otherwise skipped, not estimated), `variability_index`, `aerobic_decoupling`.
+- [ ] Backfill command for existing activities (one-shot, container-run) — all 530
+      real runs, so the PMC chart has real historical depth from day one rather
+      than starting from a flat line.
+- [ ] Verify: hand-check the hrTSS formula against a couple of real runs with known
+      HR/duration before backfilling everything; confirm the Garmin auto-populate
+      step doesn't fire (and doesn't overwrite) once threshold_hr is already set.
+- [ ] Commit: "Phase 6.1: per-activity TSS/EF (+ NP/IF/VI/decoupling where power
+      exists) + Garmin LTHR auto-populate"
 
 ### 6.2 PMC pipeline
 - [ ] `DailyMetrics` table: `(user_id, date) PK, trimp, ctl, atl, tsb,
@@ -2004,7 +2053,10 @@ nothing-was-written.
       actual_tss into `weekly_plan`; `stats.readiness` switches acuteChronicRatio
       to ATL/CTL; strength tonnage → TRIMP via fixed intensity factor (documented
       v1 approximation)
-- [ ] `GET /api/metrics?days=` + Insights CTL/ATL/TSB chart
+- [ ] `GET /api/metrics?days=` + Insights CTL/ATL/TSB chart — the actual
+      visual-impact payoff this phase was picked for; a real multi-line trend
+      chart (fitness/fatigue/form over months) using `dataviz` skill guidance for
+      styling/palette, backed by the real backfilled TSS history from 6.1.
 - [ ] Verify: hand-check CTL/ATL recursion on a known 5-day window
 - [ ] Commit: "Phase 6.2: PMC pipeline (CTL/ATL/TSB)"
 
