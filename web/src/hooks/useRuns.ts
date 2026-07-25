@@ -1,4 +1,4 @@
-import { useQuery } from "@tanstack/react-query"
+import { useQuery, keepPreviousData } from "@tanstack/react-query"
 import { api, type RunsQuery } from "@/lib/api"
 import { mergeDuplicateRuns } from "@/lib/runs"
 
@@ -11,6 +11,11 @@ export function useRuns(query: RunsQuery = {}) {
     queryFn: () => api.runs(query),
     select: mergeDuplicateRuns,
     staleTime: 5 * 60_000,
+    // Keep showing the previous range's data (with isFetching:true) while a
+    // new range loads, instead of the query resetting to undefined and every
+    // chart built on it unmounting — see ChartCanvas's `loading` prop, which
+    // fades the old chart instead of it disappearing then popping back in.
+    placeholderData: keepPreviousData,
   })
 }
 

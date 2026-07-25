@@ -2176,6 +2176,35 @@ re-fetching a shifted one.
       label back proportionally to 30/365 days; YTD shows no range label at
       all and a drag there produces no date-range change (the only pixel
       diff observed was Chart.js's own hover tooltip, not a real shift).
+- [x] **Second follow-up fix (user-reported: "flash and snap reload")**: the
+      drag-to-shift-window fix above worked functionally but felt jarring.
+      Two separate causes, both fixed:
+      1. The drag-release itself reset `transform` to `""` instantly —
+         `ChartCanvas.tsx` now eases it back over 220ms
+         (`cubic-bezier(0.22, 1, 0.36, 1)`, a standard decelerate curve)
+         instead of an instant snap, with `transition: none` during the
+         actual drag so live tracking stays 1:1.
+      2. The bigger cause: none of the range-driven query hooks
+         (`useRuns`/`useMetrics`/`useWellness`/`useSteps`) set
+         `placeholderData: keepPreviousData`, so every drag-triggered
+         `queryKey` change reset `data` to `undefined` while refetching —
+         each chart's config `useMemo` (e.g. `pmcConfig`) returns `null` on
+         missing data, which unmounted `ChartCanvas` entirely
+         (`{pmcConfig && <ChartCanvas .../>}`), so the whole chart
+         disappeared and then remounted from scratch once the new range
+         arrived. This, not the transform snap, was the real "flash and
+         reload." Fixed by adding `placeholderData: keepPreviousData` to all
+         four hooks — the previous range's data (and thus the chart) now
+         stays mounted and visible during a refetch. `ChartCanvas` gained a
+         `loading` prop (wired to each chart's backing query's
+         `isFetching`) that fades the canvas to 35% opacity over the refetch
+         instead of a hard content swap. Verified live via a Playwright
+         script reading the canvas's live `transform`/`transition` style and
+         its wrapper's computed opacity through a drag-release cycle:
+         confirmed the canvas never goes fully detached from the DOM
+         mid-refetch (which it did before this fix — `parentElement` came
+         back empty/null at every checkpoint after release) and the eased
+         transition is present during the release window.
 - [x] Legends: audited every multi-series chart. PMC and Sleep already had
       real Chart.js legends; Pace/Cadence/HR Trend already had a manual JSX
       legend row (kept as-is — it labels which axis Pace belongs to, which a

@@ -11,6 +11,7 @@ export function ChartCanvas({
   config,
   height = 200,
   onWindowDrag,
+  loading = false,
 }: {
   config: ChartConfiguration
   height?: number
@@ -21,6 +22,12 @@ export function ChartCanvas({
   // chartjs-plugin-zoom's built-in pan (which only slides the view within
   // data that's already loaded); dragging here changes what's loaded.
   onWindowDrag?: (fraction: number) => void
+  // True while the query backing this chart's data is refetching after a
+  // window-drag/FilterBar change. Fades the canvas out/in over the swap
+  // instead of the new dataset popping in as a hard cut — see the
+  // release-snap comment below for why the drag gesture itself needed the
+  // same "ease instead of jump-cut" treatment.
+  loading?: boolean
 }) {
   const ref = useRef<HTMLCanvasElement>(null)
 
@@ -38,10 +45,12 @@ export function ChartCanvas({
     let dragging = false
     let startX = 0
     const DRAG_THRESHOLD_PX = 20
+    const RELEASE_TRANSITION = "transform 220ms cubic-bezier(0.22, 1, 0.36, 1)"
 
     const begin = (clientX: number) => {
       dragging = true
       startX = clientX
+      canvas.style.transition = "none" // live 1:1 tracking while actually dragging
       canvas.style.cursor = "grabbing"
     }
     const move = (clientX: number) => {
@@ -51,10 +60,17 @@ export function ChartCanvas({
     const end = (clientX: number) => {
       if (!dragging) return
       dragging = false
-      canvas.style.transform = ""
-      canvas.style.cursor = "grab"
       const deltaPx = clientX - startX
       const width = canvas.getBoundingClientRect().width
+      // Ease back to center instead of an instant snap — the snap-back
+      // reads as a "flash" when it happens the same instant the underlying
+      // data starts refetching (see PLAN.md 6.2.1 follow-up).
+      canvas.style.transition = RELEASE_TRANSITION
+      canvas.style.transform = ""
+      canvas.style.cursor = "grab"
+      window.setTimeout(() => {
+        canvas.style.transition = ""
+      }, 220)
       if (onWindowDrag && width > 0 && Math.abs(deltaPx) > DRAG_THRESHOLD_PX) {
         onWindowDrag(deltaPx / width)
       }
@@ -96,7 +112,10 @@ export function ChartCanvas({
   }, [config, onWindowDrag])
 
   return (
-    <div className="mt-2 overflow-hidden">
+    <div
+      className="mt-2 overflow-hidden transition-opacity duration-200"
+      style={{ opacity: loading ? 0.35 : 1 }}
+    >
       <canvas ref={ref} height={height} />
     </div>
   )
