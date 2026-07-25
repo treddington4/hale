@@ -10,6 +10,7 @@ import { ChartCard, CardGrid } from "@/components/home/ChartCard"
 import { DashBar } from "@/components/home/DashBar"
 import { GoalCard } from "@/components/home/GoalCard"
 import { FitnessTrendCard } from "@/components/home/FitnessTrendCard"
+import { GearWearCard } from "@/components/home/GearWearCard"
 import { Skeleton } from "@/components/ui/skeleton"
 
 const WEEK_MS = 7 * 86400000
@@ -292,6 +293,7 @@ export function HomePage() {
 
       <DashboardCards />
       <WellnessCards />
+      <GearWearCard />
     </div>
   )
 }

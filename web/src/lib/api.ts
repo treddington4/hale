@@ -194,6 +194,34 @@ export interface GoalProgress {
   daysRemaining?: number | null
 }
 
+export type GearKind = "shoe" | "bike" | "bike_component"
+
+export interface Gear {
+  id: string
+  name: string
+  kind: GearKind
+  parentGearId: string | null
+  isDefault: boolean
+  startDate: string | null
+  retiredDate: string | null
+  replaceAtMi: number | null
+  notes: string | null
+  createdAt: string
+  totalMiles: number
+  wearPct: number | null
+}
+
+export interface GearInput {
+  name: string
+  kind: GearKind
+  parentGearId?: string | null
+  isDefault?: boolean
+  startDate?: string
+  retiredDate?: string | null
+  replaceAtMi?: number | null
+  notes?: string | null
+}
+
 export interface Goal {
   id: string
   goalType: GoalType
@@ -519,6 +547,7 @@ export interface RunUpdate {
   rpe?: number | null
   isTreadmill?: boolean
   notes?: string
+  gearId?: string | null
 }
 
 export interface ApiTokenSummary {
@@ -547,6 +576,12 @@ export const api = {
   updateGoal: (id: string, body: Partial<GoalInput> & { status?: GoalStatus }) =>
     request<Goal>(`/api/goals/${id}`, { method: "PATCH", body: JSON.stringify(body) }),
   deleteGoal: (id: string) => request<{ deleted: true }>(`/api/goals/${id}`, { method: "DELETE" }),
+
+  gear: () => request<Gear[]>("/api/gear"),
+  createGear: (body: GearInput) => request<Gear[]>("/api/gear", { method: "POST", body: JSON.stringify(body) }),
+  updateGear: (id: string, body: Partial<GearInput>) =>
+    request<Gear[]>(`/api/gear/${id}`, { method: "PATCH", body: JSON.stringify(body) }),
+  deleteGear: (id: string) => request<{ deleted: true }>(`/api/gear/${id}`, { method: "DELETE" }),
 
   stravaStatus: () => request<StravaStatus>("/api/strava/status"),
   garminStatus: () => request<GarminStatus>("/api/garmin/status"),

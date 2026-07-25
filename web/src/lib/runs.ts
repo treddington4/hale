@@ -89,6 +89,7 @@ export interface Run {
   verticalRatioPct: number | null
   strideLengthM: number | null
   avgPowerWatts: number | null
+  gearId: string | null
   mergedSources?: string[]
   mergedIds?: string[]
   [key: string]: unknown

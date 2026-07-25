@@ -132,6 +132,7 @@ def _run_to_dict(r: Run):
         "verticalRatioPct": r.vertical_ratio_pct, "strideLengthM": r.stride_length_m, "avgPowerWatts": r.avg_power_watts,
         "exerciseSets": json.loads(r.exercise_sets_json) if r.exercise_sets_json else None,
         "tss": r.tss, "efficiencyFactor": r.efficiency_factor,
+        "gearId": r.gear_id,
     }
 
 
@@ -182,6 +183,8 @@ async def update_run(run_id: str, request: Request, user_id: str = Depends(auth.
             run.is_treadmill = body["isTreadmill"]
         if "notes" in body:
             run.notes = body["notes"]
+        if "gearId" in body:
+            run.gear_id = body["gearId"]  # None explicitly unassigns
         db.commit()
         return _run_to_dict(run)
     finally:

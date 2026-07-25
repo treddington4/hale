@@ -1,6 +1,7 @@
 import { useEffect, useState } from "react"
 import type { Run, RunUpdate } from "@/lib/api"
 import { activityFamily, isDistanceActivity, RUN_TYPES, STRENGTH_TYPES } from "@/lib/runs"
+import { useGear } from "@/hooks/useGear"
 import { Dialog, DialogContent, DialogHeader, DialogTitle } from "@/components/ui/dialog"
 import { Label } from "@/components/ui/label"
 import { Input } from "@/components/ui/input"
@@ -16,7 +17,15 @@ function emptyForm(run: Run | null) {
     isTreadmill: run?.isTreadmill ?? false,
     rpe: run?.rpe != null ? String(run.rpe) : "",
     notes: run?.notes ?? "",
+    gearId: run?.gearId ?? "",
   }
+}
+
+// Same Ride-vs-everything-else split as the backend's auto-assignment
+// (stats._gear_kind_for_activity) — this app is primarily a running app, so
+// "bike" only applies to Ride and everything else wears shoes.
+function gearKindForActivity(activityType: string): "shoe" | "bike" {
+  return activityType === "Ride" ? "bike" : "shoe"
 }
 
 // Ports openEditModal() — "Run type" only makes sense for a run, session type
@@ -36,6 +45,7 @@ export function EditRunDialog({
   onSave: (body: RunUpdate) => void
 }) {
   const [form, setForm] = useState(() => emptyForm(run))
+  const { data: gear } = useGear()
 
   useEffect(() => {
     if (open) setForm(emptyForm(run))
@@ -46,6 +56,9 @@ export function EditRunDialog({
   const family = activityFamily(run.activityType)
   const isDistance = isDistanceActivity(run.activityType)
   const typeOptions = family === "run" ? RUN_TYPES : family === "strength" ? STRENGTH_TYPES : null
+  const gearOptions = isDistance
+    ? (gear ?? []).filter((g) => g.kind === gearKindForActivity(run.activityType) && !g.retiredDate)
+    : []
 
   function save() {
     const body: RunUpdate = {
@@ -57,6 +70,7 @@ export function EditRunDialog({
       body.isTreadmill = form.isTreadmill
       body.tempF = form.isTreadmill ? null : form.tempF === "" ? null : Number(form.tempF)
       body.weatherCondition = form.isTreadmill ? null : form.weatherCondition
+      body.gearId = form.gearId || null
     }
     onSave(body)
     onOpenChange(false)
@@ -113,6 +127,24 @@ export function EditRunDialog({
                 />
                 Treadmill run (not outdoors)
               </label>
+              {gearOptions.length > 0 && (
+                <div className="flex flex-col gap-1.5">
+                  <Label>Gear</Label>
+                  <Select value={form.gearId || "__none"} onValueChange={(v) => setForm({ ...form, gearId: v === "__none" ? "" : v })}>
+                    <SelectTrigger>
+                      <SelectValue />
+                    </SelectTrigger>
+                    <SelectContent>
+                      <SelectItem value="__none">Unassigned</SelectItem>
+                      {gearOptions.map((g) => (
+                        <SelectItem key={g.id} value={g.id}>
+                          {g.name}
+                        </SelectItem>
+                      ))}
+                    </SelectContent>
+                  </Select>
+                </div>
+              )}
             </>
           )}
           <div className="flex flex-col gap-1.5">

@@ -17,7 +17,7 @@ from datetime import datetime, timedelta, timezone
 from sqlalchemy import func
 
 from .models import (
-    Run, DailySteps, Goal, UserTrainingConfig, DEFAULT_USER_ID, owned_by,
+    Run, DailySteps, Goal, Gear, UserTrainingConfig, DEFAULT_USER_ID, owned_by,
     SessionLocal, get_sync_meta, set_sync_meta, user_key,
 )
 from .util import local_today, compute_tss, compute_efficiency_factor
@@ -707,3 +707,72 @@ def backfill_run_metrics(db, user_id: str = DEFAULT_USER_ID) -> int:
         r.efficiency_factor = compute_efficiency_factor(r.avg_pace_sec_per_mi, r.avg_hr)
     db.commit()
     return len(runs)
+
+
+# Ride is the only non-foot-strike activity type this app really sees (see
+# CLAUDE.md — this is primarily a running app); everything else (Run, Walk,
+# Hike, treadmill variants, ...) wears shoes. A finer per-activity_type mapping
+# isn't worth it until a real second non-shoe, non-bike activity shows up.
+def _gear_kind_for_activity(activity_type: str) -> str:
+    return "bike" if activity_type == "Ride" else "shoe"
+
+
+def assign_default_gear(db, run: Run, user_id: str = DEFAULT_USER_ID) -> None:
+    """Phase 6.3 — called once per run at sync time (strava.py/garmin_sync.py's
+    _process_activity), mirroring compute_tss's "only at sync time going forward"
+    scope. Only ever fills in an unset gear_id — never overwrites a manual
+    reassignment made via PATCH /api/runs/{id}. A no-op if the user has no
+    default gear of the matching kind, which is the common case until they've
+    actually set one up in Settings."""
+    if run.gear_id:
+        return
+    kind = _gear_kind_for_activity(run.activity_type)
+    default = (
+        db.query(Gear)
+        .filter(owned_by(Gear.user_id, user_id), Gear.kind == kind, Gear.is_default.is_(True), Gear.retired_date.is_(None))
+        .first()
+    )
+    if default:
+        run.gear_id = default.id
+
+
+def gear_summary(db, user_id: str = DEFAULT_USER_ID) -> list[dict]:
+    """Read-time only (see Gear's own docstring for why) — sums Run.distance_mi per
+    gear_id in one query rather than N+1'ing per gear item. bike_component rows
+    don't get their own Run.gear_id assignments; they track their parent bike's
+    ride mileage from their own start_date onward instead, so replacing a chain
+    resets only that component's counter without touching the bike's."""
+    gear_list = (
+        db.query(Gear)
+        .filter(owned_by(Gear.user_id, user_id))
+        .order_by(Gear.kind, Gear.retired_date.is_(None).desc(), Gear.created_at)
+        .all()
+    )
+    mileage_by_gear_id = dict(
+        db.query(Run.gear_id, func.sum(Run.distance_mi))
+        .filter(owned_by(Run.user_id, user_id), Run.gear_id.isnot(None))
+        .group_by(Run.gear_id)
+        .all()
+    )
+
+    def component_mileage(component: Gear) -> float:
+        if not component.parent_gear_id:
+            return 0.0
+        q = db.query(func.sum(Run.distance_mi)).filter(
+            owned_by(Run.user_id, user_id), Run.gear_id == component.parent_gear_id,
+        )
+        if component.start_date:
+            q = q.filter(Run.date >= component.start_date)
+        return q.scalar() or 0.0
+
+    out = []
+    for g in gear_list:
+        miles = component_mileage(g) if g.kind == "bike_component" else (mileage_by_gear_id.get(g.id, 0.0) or 0.0)
+        wear_pct = round(miles / g.replace_at_mi * 100, 1) if g.replace_at_mi else None
+        out.append({
+            "id": g.id, "name": g.name, "kind": g.kind, "parentGearId": g.parent_gear_id,
+            "isDefault": g.is_default, "startDate": g.start_date, "retiredDate": g.retired_date,
+            "replaceAtMi": g.replace_at_mi, "notes": g.notes, "createdAt": g.created_at,
+            "totalMiles": round(miles, 1), "wearPct": wear_pct,
+        })
+    return out

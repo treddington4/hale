@@ -99,6 +99,14 @@ class Run(Base):
     tss = Column(Float, nullable=True)
     efficiency_factor = Column(Float, nullable=True)
 
+    # Phase 6.3 — gear lifecycle tracking. Auto-assigned at sync time to the
+    # user's default gear for this activity's kind (see stats.assign_default_gear),
+    # only when unset — never overwrites a manual reassignment. No FK constraint:
+    # SQLite doesn't enforce them by default in this app, and gear_summary()
+    # already tolerates a dangling gear_id (a deleted gear item) by simply not
+    # matching it to anything, rather than needing a migration to null it out.
+    gear_id = Column(String, nullable=True)
+
 
 class DailySteps(Base):
     """Garmin-only daily step count. Unlike Run rows (one per activity), this is one row
@@ -295,6 +303,31 @@ class Goal(Base):
     priority = Column(Integer, default=0)  # lower shows first; legacy-NULL rows (pre-dating this
                                              # column) treated as 0 at read/sort time, same pattern
                                              # as everywhere else in this codebase
+
+
+class Gear(Base):
+    """Shoe/bike/bike-component lifecycle tracking (Phase 6.3). Mileage is always
+    computed at read time from linked Run rows (stats.gear_summary), never stored/
+    recomputed at sync time — unlike TSS/GAP elsewhere, gear assignment can change
+    retroactively (reassigning a batch of old runs to a different pair), so a
+    stored running total would need its own invalidation logic for no real benefit.
+    `kind="bike_component"` rows track a sub-part of a bike (chain, tires) via
+    `parent_gear_id` — their mileage is the parent bike's ride mileage from their
+    own `start_date` onward, not directly linked to any Run themselves (see
+    stats.gear_summary), so replacing a chain resets only its own counter."""
+    __tablename__ = "gear"
+
+    id = Column(String, primary_key=True)  # f"gear_{uuid.uuid4().hex[:12]}"
+    user_id = Column(String, ForeignKey("users.id", ondelete="CASCADE"), nullable=True)  # see owned_by()
+    name = Column(String)
+    kind = Column(String)  # "shoe" | "bike" | "bike_component"
+    parent_gear_id = Column(String, nullable=True)  # bike_component only -> its bike's Gear.id
+    is_default = Column(Boolean, default=False)  # auto-assigned to new runs of the matching kind at sync time; at most one per (user, kind)
+    start_date = Column(String, nullable=True)  # YYYY-MM-DD
+    retired_date = Column(String, nullable=True)
+    replace_at_mi = Column(Float, nullable=True)  # optional wear-alert threshold
+    notes = Column(Text, nullable=True)
+    created_at = Column(String)
 
 
 class HealthNote(Base):

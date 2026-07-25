@@ -17,6 +17,7 @@ import { usePush } from "@/hooks/usePush"
 import { useTrainingConfig, useUpdateTrainingConfig } from "@/hooks/useWorkouts"
 import type { CoachPersonality, SyncMetaInfo, ApiTokenCreated, Sex } from "@/lib/api"
 import { SyncControls } from "@/components/settings/SyncControls"
+import { GearSection } from "@/components/settings/GearSection"
 import { Card } from "@/components/ui/card"
 import { Button } from "@/components/ui/button"
 import { Input } from "@/components/ui/input"
@@ -730,6 +731,7 @@ export function SettingsPage() {
       <CoachFeedbackSection />
       <ProfileSection />
       <TrainingSection />
+      <GearSection />
       <PushSection />
       <SyncScheduleSection />
       <AboutSection />

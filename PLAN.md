@@ -2351,12 +2351,79 @@ page low end."
       if Insights screenshots keep looking wrong.
 - [x] Commit: "Phase 6.2.3: swipe-paging carousel for real drag-reveals-data"
 
-### 6.3 Gear tracking
-- [ ] `Gear` table (`id, user_id, name, kind shoe|bike|bike_component,
-      parent_gear_id?, start_date, retired_date?, replace_at_mi?`) +
-      `Run.gear_id`; default-gear-per-type rule at sync; `stats.gear_summary`
-      (read-time mileage); CRUD + Settings UI + wear on dashboard
-- [ ] Commit: "Phase 6.3: gear lifecycle tracking"
+### 6.3 Gear tracking — done
+Closes out Phase 6 — the one piece bundled in back at the start of the phase
+("Include gear tracking too") that hadn't been built yet. Picked as the next
+feature after 6.2.3 with the user's own framing ("next bang for our token"),
+given it was already scoped and promised rather than starting something new.
+- [x] `Gear` table (`app/models.py`): `id, user_id, name, kind
+      shoe|bike|bike_component, parent_gear_id?, is_default, start_date,
+      retired_date?, replace_at_mi?, notes, created_at`. `Run.gear_id` added
+      (nullable, no FK constraint — `gear_summary()` already tolerates a
+      dangling id from a deleted gear item by simply not matching it, so no
+      migration is needed to null it out on delete).
+- [x] `stats.assign_default_gear(db, run, user_id)` — called once per run at
+      sync time from both `strava.py` and `garmin_sync.py`'s
+      `_process_activity` (same "only at sync time going forward" scope as
+      Phase 6.1's TSS). Only ever fills an *unset* `gear_id`, never overwrites
+      a manual reassignment. Kind mapping is a simple Ride-vs-everything-else
+      split (`_gear_kind_for_activity`) — this app is primarily a running app
+      (see CLAUDE.md), so a finer per-activity_type mapping isn't worth it
+      until a real second non-shoe, non-bike activity shows up. A retired
+      default is correctly excluded from matching (query filters
+      `retired_date.is_(None)`), so retiring your default shoe without
+      picking a new one just means new runs get no auto-assignment rather
+      than wrongly landing on a retired item.
+- [x] `stats.gear_summary(db, user_id)` — read-time only, matching this
+      codebase's discipline of computing wear/mileage fresh rather than
+      storing a running total that would need its own invalidation (gear
+      reassignment can happen retroactively, unlike TSS/GAP which are fixed
+      once computed). Shoes/bikes sum `Run.distance_mi` directly by
+      `gear_id` in one grouped query (not N+1'd per item); `bike_component`
+      rows don't get their own `Run.gear_id` — they track their parent
+      bike's ride mileage from their own `start_date` onward instead, so
+      replacing a chain resets only that component's counter without
+      touching the bike's own total.
+- [x] `app/routes/gear.py` — full CRUD (`GET/POST /api/gear`, `PATCH/DELETE
+      /api/gear/{id}`), registered in `main.py`. At most one `is_default`
+      gear item per (user, kind) enforced server-side
+      (`_unset_other_defaults`) on both create and update, not just trusted
+      to the frontend. `PATCH /api/runs/{id}` gained `gearId` (`None`
+      explicitly unassigns); `_run_to_dict` now exposes it.
+- [x] Frontend: `web/src/components/settings/GearSection.tsx` +
+      `GearFormDialog.tsx` (modeled directly on the existing
+      `GoalFormDialog.tsx` pattern) — grouped list (Shoes / Bikes, with
+      components nested under their parent bike), each row showing a wear
+      bar (green → gold at 85% → red at/past 100%) when `replaceAtMi` is
+      set, Default/Retired badges, Edit/Retire/Delete actions (no confirm
+      dialog on delete, matching this codebase's existing `GoalCard` "hot"-
+      colored link-button convention rather than introducing a new pattern).
+      `EditRunDialog.tsx` gained a Gear select (shown only for distance
+      activities, options filtered to the run's own kind) so a run can be
+      manually (re)assigned independent of the default-assignment rule.
+      `web/src/components/home/GearWearCard.tsx` — Home's "wear on
+      dashboard" piece: shows non-retired, `replaceAtMi`-tracked gear sorted
+      by wear%, click-through to Settings. Degrades to nothing (not an
+      empty-state card) until the user has configured at least one tracked
+      item, matching `WellnessCards`' own pattern for an optional,
+      not-yet-configured data source.
+- [x] Verified end-to-end against a throwaway container running the real
+      built app (not just the dev server) against a fresh copy of the
+      production DB — backend exercised directly via curl/`docker exec`
+      python first (create/list/update/retire/delete, default-uniqueness
+      enforcement, bike_component mileage correctly inheriting from its
+      parent bike's rides after its own start_date, `assign_default_gear`
+      filling an unset `gear_id` on a real run while leaving an already
+      manually-assigned run untouched, a retired default correctly not
+      auto-assigned), then the full UI via Playwright (add a shoe in
+      Settings → default-uniqueness visibly re-badges the old default →
+      assign a real run to it via `EditRunDialog` → Home's Gear Wear card
+      picks it up with real mileage, no page-specific wiring needed beyond
+      the shared `["gear"]` query key). `tsc -b --noEmit`/`oxlint`(one
+      pre-existing unrelated warning)/`npm run build` clean; the full Docker
+      image build itself (not just `tsc`) was used as an extra import-
+      correctness check before touching production.
+- [x] Commit: "Phase 6.3: gear lifecycle tracking"
 
 ---
 
