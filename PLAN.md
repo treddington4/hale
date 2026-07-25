@@ -2265,6 +2265,92 @@ sensible representation of the other two pieces.
       to two lines without overflow.
 - [x] Commit: "Phase 6.2.2: Home screen fitness trend card"
 
+### 6.2.3 Swipe-paging carousel (real fix for drag-reveals-empty-space) — done
+User-reported follow-up to 6.2.1's second fix: even with the eased release and
+`keepPreviousData` fade, dragging still showed blank canvas mid-drag, because
+that whole approach only ever slid the ALREADY-RENDERED chart image via CSS
+`transform` — there was nothing else rendered to reveal past its edges. User
+asked for real pre-loading instead, explicitly choosing the bigger rewrite
+over a lighter padding-only patch when offered the choice, with two specific
+refinements: "unload if more than 2 pages away" and "start by loading extra
+page low end."
+- [x] **Architecture**: replaced the single-chart CSS-transform drag with a
+      genuine 3-page carousel. For each of the 8 date-based charts (the same
+      ones from 6.2.1), `InsightsPage.tsx` now fetches THREE windows per data
+      source (current, prev = anchor − 1 window, next = anchor + 1 window)
+      instead of one, and a new `ChartCarousel.tsx` renders all three as
+      real, already-mounted Chart.js instances in a flex row (`prevPane |
+      currentPane | nextPane`, each exactly one container-width via
+      `width: 33.3333%` on a `width: 300%` row — percentages resolve against
+      a definite containing-block width so this needed no JS-measured pixel
+      state at all). Dragging translates the row by a live pixel offset via
+      `calc(-33.3333% + {dx}px)`; releasing past 30% of the container's width
+      snaps to whichever neighbor and calls back into `InsightsPage` to shift
+      `FilterState.anchor` by one window (the same mechanism 6.2.1's
+      `handleWindowDrag`/FilterBar's prev-next buttons already used, just
+      triggered by a discrete swipe-commit instead of a continuous drag
+      fraction) — matching a standard mobile calendar/carousel paging feel
+      rather than the old proportional-shift model.
+- [x] **"Start by loading extra page low end"**: `next` is only fetched once
+      the current page doesn't already reach today (`hasNext = dragEnabled &&
+      end < today`) — from the default "today" view there's nothing real to
+      page forward into, so only the earlier/"low" neighbor gets prefetched
+      on first load, matching what was asked rather than always fetching
+      both directions unconditionally.
+- [x] **"Unload if more than 2 pages away"**: `useRuns`/`useMetrics`/
+      `useWellness`/`useSteps` all gained an `enabled` param so prev/next can
+      be conditionally fetched; a new effect in `InsightsPage.tsx` tracks
+      every visited page's anchor in a `Map` and calls `queryClient.
+      removeQueries()` for the corresponding `runs`/`metrics`/`wellness`/
+      `steps` cache entries once a page's distance from the current one
+      (rounded to whole windows) exceeds 2. Verified live: paging backward 4
+      windows then forward through all of them again showed cache hits for
+      the middle pages but genuine fresh network requests for the two
+      furthest-back pages once revisited, confirming eviction (not just
+      time-based gc) actually happened.
+- [x] **Real bug found during verification, not just a timing artifact**:
+      each `ChartCarousel` pane's canvas got stuck at Chart.js's ~300px
+      browser-default width instead of its true ~990px pane width — but only
+      sometimes, which pointed at a genuine race rather than a one-time
+      "measured too early" issue. Root cause, confirmed via live inspection
+      (`chart.resize(w,h)` called with the *correct* measured width, then
+      immediately overwritten back to 300 on the next tick): Chart.js's own
+      `responsive: true` (the default) runs its OWN ResizeObserver-driven
+      auto-resize on the canvas's parent, and that internal measurement was
+      getting the nested 300%-wide nested-flex layout wrong — actively
+      fighting our own explicit resize rather than just being slow. Fixed by
+      disabling Chart.js's own responsive sizing for carousel panes
+      (`responsive: false, maintainAspectRatio: false` merged into each
+      pane's config) and driving size entirely from a `requestAnimationFrame`
+      + `ResizeObserver` pair that measures the pane div ourselves and calls
+      `chart.resize(clientWidth, clientHeight)` with explicit numbers —
+      confirmed via 5 repeated fresh-browser runs (previously inconsistent
+      between runs, now consistently correct every time).
+- [x] Verified end-to-end against the real production backend on a throwaway
+      dev container: drag reveals genuine adjacent-page data mid-gesture
+      (screenshotted at 0/200/500px of drag showing 07-17's real bars/lines
+      sliding into a fixed viewport region as 07-18-24's data slides out, not
+      blank canvas); releasing past threshold commits to the neighbor and the
+      FilterBar's range label updates to match; releasing short of threshold
+      snaps back with no change; dragging toward "today" from the default
+      view is resisted (nothing to page into) with no change; 4 repeated
+      backward pages walk correctly through consecutive weeks with no
+      errors; the fullscreen expand dialog (6.2.1) still works correctly
+      re-mounting a second independent carousel instance; mobile (390×844,
+      touch-enabled context) renders and sizes correctly too.
+      `tsc -b --noEmit`/`oxlint`(one pre-existing unrelated warning)/`npm run
+      build` all clean.
+      **Caveat found along the way, not fixed**: `scripts/screenshot.py`'s
+      "force-expand body/main to natural height" trick for full-page capture
+      (see its own comment) now reliably mis-renders these carousel charts
+      specifically — forcing the layout to reflow *after* Chart.js has
+      already sized itself trips the same kind of resize-timing issue this
+      phase just fixed for the real app, but in the screenshot tool's own
+      DOM hack. The real app (verified via natural in-app scrolling, no style
+      forcing) is unaffected; this is a narrow tooling gap worth a follow-up
+      if Insights screenshots keep looking wrong.
+- [x] Commit: "Phase 6.2.3: swipe-paging carousel for real drag-reveals-data"
+
 ### 6.3 Gear tracking
 - [ ] `Gear` table (`id, user_id, name, kind shoe|bike|bike_component,
       parent_gear_id?, start_date, retired_date?, replace_at_mi?`) +

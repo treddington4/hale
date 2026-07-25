@@ -5,7 +5,7 @@ import { mergeDuplicateRuns } from "@/lib/runs"
 // Phase 0.5 windowed /api/runs (see main.py get_runs) — defaults to the last 90
 // days server-side; pass `all: true` for true all-time totals. Result is merged
 // client-side the same way regardless of range (see lib/runs.ts).
-export function useRuns(query: RunsQuery = {}) {
+export function useRuns(query: RunsQuery = {}, enabled = true) {
   return useQuery({
     queryKey: ["runs", query],
     queryFn: () => api.runs(query),
@@ -16,6 +16,7 @@ export function useRuns(query: RunsQuery = {}) {
     // chart built on it unmounting — see ChartCanvas's `loading` prop, which
     // fades the old chart instead of it disappearing then popping back in.
     placeholderData: keepPreviousData,
+    enabled,
   })
 }
 
