@@ -57,7 +57,7 @@ export interface RouteMetricPoint {
 // nothing beyond `route`/`routeMetrics`, already typed here) still pass through.
 export interface Run {
   id: string
-  source: "strava" | "garmin"
+  source: "strava" | "garmin" | "hevy"
   activityType: string
   date: string
   startTime: string | null
@@ -158,13 +158,25 @@ function isLikelyDuplicate(a: Run, b: Run): boolean {
   if (a.source === b.source) return false
   if (a.date !== b.date) return false
   if (canonicalActivityType(a.activityType) !== canonicalActivityType(b.activityType)) return false
+
+  const toMin = (t: string) => {
+    const [h, m] = t.split(":").map(Number)
+    return h * 60 + m
+  }
+
+  // Strength activities carry no meaningful distance (Garmin/Hevy both report
+  // 0 or null), so the distance-proximity check below can never confirm a
+  // match for them -- match on start-time proximity alone instead, same
+  // ~30min tolerance the backend's own Hevy<->Garmin matcher already uses
+  // (garmin_enrich.py's find_matching_garmin_run) for exactly this pairing.
+  if (canonicalActivityType(a.activityType) === "strength") {
+    if (!a.startTime || !b.startTime) return false
+    return Math.abs(toMin(a.startTime) - toMin(b.startTime)) <= 30
+  }
+
   if (a.distanceMi == null || b.distanceMi == null) return false
   if (Math.abs(a.distanceMi - b.distanceMi) > Math.max(0.1, a.distanceMi * 0.05)) return false
   if (a.startTime && b.startTime) {
-    const toMin = (t: string) => {
-      const [h, m] = t.split(":").map(Number)
-      return h * 60 + m
-    }
     if (Math.abs(toMin(a.startTime) - toMin(b.startTime)) > 10) return false
   }
   return true
@@ -174,15 +186,30 @@ function isLikelyDuplicate(a: Run, b: Run): boolean {
 // anything Strava lacks (mainly running-dynamics fields, which Strava never
 // populates). Exception: Garmin's activity names are usually more descriptive than
 // Strava's generic auto-names, so they win regardless of the general merge order.
+// Hevy pairs (always strength, never involve Strava) follow a different rule:
+// Hevy's manually-logged exercise/set data is authoritative over Garmin's own
+// auto-detection (often a single unreliable "UNKNOWN" blob -- see
+// stats._gear_kind_for_activity's own docstring on how unreliable that
+// detection is), so Hevy's name/exerciseSets win regardless of general merge
+// order, mirroring the Garmin-name exception above.
 function mergeRunPair(a: Run, b: Run): Run {
-  const primary = a.source === "strava" ? a : b.source === "strava" ? b : a
+  const bySource = (src: string) => (a.source === src ? a : b.source === src ? b : null)
+  const strava = bySource("strava")
+  const hevy = bySource("hevy")
+  const garmin = bySource("garmin")
+
+  const primary = strava ?? hevy ?? a
   const secondary = primary === a ? b : a
   const merged: Run = { ...secondary }
   Object.entries(primary).forEach(([k, v]) => {
     if (!isEmptyValue(v)) (merged as Record<string, unknown>)[k] = v
   })
-  const garminSide = a.source === "garmin" ? a : b.source === "garmin" ? b : null
-  if (garminSide && !isEmptyValue(garminSide.name)) merged.name = garminSide.name
+  if (hevy) {
+    if (!isEmptyValue(hevy.name)) merged.name = hevy.name
+    if (!isEmptyValue(hevy.exerciseSets)) merged.exerciseSets = hevy.exerciseSets
+  } else if (garmin && !isEmptyValue(garmin.name)) {
+    merged.name = garmin.name
+  }
   merged.mergedSources = [a.source, b.source].sort()
   merged.mergedIds = [a.id, b.id]
   return merged

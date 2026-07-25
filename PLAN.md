@@ -3359,6 +3359,40 @@ standouts live rather than just listing them:
 
 ---
 
+## Phase 25 — Fix Garmin+Hevy duplicate strength cards in the merge view — done
+
+User-reported: duplicate strength workout cards on the same day after Phase 23's
+Garmin enrichment shipped. Root cause: `web/src/lib/runs.ts`'s `mergeDuplicateRuns`
+(the client-side dedup that already merges Strava+Garmin pairs, per CLAUDE.md's
+"Two independent sync sources" section) was written before Hevy existed as a
+third source and never updated:
+- `Run["source"]`'s TS type was still `"strava" | "garmin"` — `api.ts`'s
+  `SyncSource` already correctly included `"hevy"` since Phase 6.5, this was the
+  one place left stale.
+- `isLikelyDuplicate`'s distance-proximity check (`Math.abs(a.distanceMi -
+  b.distanceMi) > ...`) requires non-null `distanceMi` on both sides. Strength
+  activities carry no meaningful distance — Garmin reports 0, Hevy's
+  `_upsert_workout` never sets `distance_mi` at all (stays `NULL`) — so the
+  `a.distanceMi == null || b.distanceMi == null` guard rejected every single
+  Garmin+Hevy pair regardless of how well their dates/times actually lined up.
+- [x] Strength-family pairs (`canonicalActivityType === "strength"`) now skip
+      the distance check entirely and match on start-time proximity alone
+      (±30min), mirroring the backend's own already-proven
+      `garmin_enrich.find_matching_garmin_run` tolerance for the exact same
+      pairing — non-strength families keep the original distance+10min logic
+      unchanged.
+- [x] `mergeRunPair`'s primary-source preference extended: `strava > hevy >
+      garmin` (previously just `strava > a`, with no Hevy-aware fallback at
+      all). Hevy's name/`exerciseSets` win regardless of general merge order
+      when present — same "manually-logged data beats Garmin's own unreliable
+      auto-detection" principle already established for Phase 6.3
+      (`stats._gear_kind_for_activity`).
+- [x] Verified: `tsc -b --noEmit` clean, `oxlint` clean (one pre-existing
+      unrelated warning, same one noted in Phase 6.5's own verification).
+- [x] Commit.
+
+---
+
 ## Cross-cutting features (slot in any time after the listed dependency)
 
 - [ ] **Daily AI insight card** (after 0.3): Sonnet one-shot (separate short-lived SDK
