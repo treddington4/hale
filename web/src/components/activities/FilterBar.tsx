@@ -32,9 +32,16 @@ export function FilterBar({
   onChange: (next: FilterState) => void
   activityTypeCounts: { type: string; count: number }[]
 }) {
-  const navigable = state.mode === "rolling7" || state.mode === "week"
+  const NAVIGABLE_MODES: FilterMode[] = ["rolling7", "week", "month", "sixMonths", "year"]
+  const navigable = NAVIGABLE_MODES.includes(state.mode)
   const { start, end } = currentFilterRange(state.mode, state.anchor, state.customStart, state.customEnd)
   const today = todayMidnight()
+  // Page by the window's own length (7d/30d/182d/365d) rather than a fixed 7
+  // days — a 7-day step would take forever to click through a Year view, and
+  // this keeps the buttons consistent with drag-to-scroll's shift-by-one-
+  // window-per-swipe behavior on the charts below (InsightsPage's
+  // handleWindowDrag).
+  const windowDays = Math.round((end.getTime() - start.getTime()) / 86400000) + 1
 
   return (
     <div className="flex flex-col gap-3">
@@ -59,7 +66,7 @@ export function FilterBar({
         <div className="flex items-center gap-2">
           <button
             className="text-muted-foreground hover:text-foreground"
-            onClick={() => onChange({ ...state, anchor: new Date(state.anchor.getTime() - 7 * 86400000) })}
+            onClick={() => onChange({ ...state, anchor: new Date(state.anchor.getTime() - windowDays * 86400000) })}
           >
             <ChevronLeft className="size-4" />
           </button>
@@ -68,7 +75,7 @@ export function FilterBar({
             className="text-muted-foreground hover:text-foreground disabled:opacity-30"
             disabled={end >= today}
             onClick={() => {
-              const next = new Date(state.anchor.getTime() + 7 * 86400000)
+              const next = new Date(state.anchor.getTime() + windowDays * 86400000)
               onChange({ ...state, anchor: next > today ? today : next })
             }}
           >

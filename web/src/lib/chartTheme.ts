@@ -29,13 +29,15 @@ export function applyChartTheme() {
   applied = true
 }
 
-// Drag (mouse) / swipe (touch) to pan the visible x-range, scroll-wheel/pinch to
-// zoom — layered on top of whatever date range the FilterBar already fetched, so
-// this is fine-grained exploration *within* the loaded window, not an infinite-
-// history fetch-on-pan (which would need a much bigger data-loading redesign).
+// Scroll-wheel/pinch to zoom in *within* whatever date range the FilterBar
+// already fetched. Drag/swipe-to-pan is handled separately by ChartCanvas's
+// own pointer listeners (see onWindowDrag), which shift the actual fetched
+// date range instead of panning within already-loaded data — so the plugin's
+// own `pan` is deliberately left disabled here to avoid the two fighting over
+// the same drag gesture.
 // Spread into any time-series chart's `options.plugins.zoom`.
 export const CHART_PAN_ZOOM = {
-  pan: { enabled: true, mode: "x" as const },
+  pan: { enabled: false as const },
   zoom: {
     wheel: { enabled: true },
     pinch: { enabled: true },

@@ -2134,26 +2134,48 @@ re-fetching a shifted one.
       `react-router` (pre-existing, unrelated to this change), not fixed
       inline; flagged separately via a spawned background task instead of
       bundling an unrelated breaking downgrade into this pass.
-- [x] `CHART_PAN_ZOOM` (`chartTheme.ts`): drag/swipe pans the visible x-range,
-      scroll-wheel/pinch zooms, `limits: {x: {minRange: 2}}` floor. Spread
-      into `options.plugins.zoom` on every date-based time-series chart —
-      Training Load (PMC), Weekly Mileage, Pace/Cadence/HR Trend, Rolling
-      Pace, Daily Steps, Resting HR, VO2 Max, Sleep. Deliberately **not**
-      added to the scatter charts (temp-vs-pace/cadence/HR, cadence-vs-pace)
-      or the Sleep Stages hypnogram, since their x-axes aren't date ranges.
+- [x] `CHART_PAN_ZOOM` (`chartTheme.ts`): scroll-wheel/pinch zooms in within
+      the loaded range, `limits: {x: {minRange: 2}}` floor. Spread into
+      `options.plugins.zoom` on every date-based time-series chart — Training
+      Load (PMC), Weekly Mileage, Pace/Cadence/HR Trend, Rolling Pace, Daily
+      Steps, Resting HR, VO2 Max, Sleep. Deliberately **not** added to the
+      scatter charts (temp-vs-pace/cadence/HR, cadence-vs-pace) or the Sleep
+      Stages hypnogram, since their x-axes aren't date ranges.
       `ChartCanvas.tsx` gained a `dblclick` listener calling
       `chart.resetZoom?.()` (optional-chained so it's a no-op on any chart
       without the plugin's options set, safe to attach unconditionally).
-      Note: pan only has somewhere to go once zoomed in — with the default
-      view already showing the full loaded range, dragging is a no-op by
-      design (nothing exists past either edge to reveal); zoom-then-pan is
-      the real interaction. Verified live via a Playwright drag/wheel/
-      dblclick script comparing canvas screenshots before/after each action
-      (confirmed unzoomed pan is a no-op, zoomed pan changes pixels, wheel
-      zoom changes pixels, dblclick reset changes pixels back) — this is
-      genuine interaction verification, not just a "loads without error"
-      check, since the earlier tooling for this repo (`screenshot.py`) only
-      takes static screenshots.
+      The plugin's own `pan` is disabled (`pan: {enabled: false}`) — see the
+      follow-up fix below for why.
+- [x] **Follow-up fix (user-reported)**: initially shipped drag/swipe as
+      `chartjs-plugin-zoom`'s built-in `pan`, which only slides the view
+      *within already-loaded data* — since the default view already shows
+      the full fetched range, an unzoomed drag was a no-op by design, which
+      is not what "scroll the window left/right" meant. Replaced with real
+      window-shifting: `ChartCanvas.tsx` now tracks its own mouse/touch drag
+      (independent of the plugin, which only handles wheel/pinch zoom now)
+      and reports the drag distance as a fraction of canvas width via a new
+      `onWindowDrag` prop. `InsightsPage.tsx`'s `handleWindowDrag` converts
+      that fraction into a day count proportional to the current window
+      length and shifts `FilterState.anchor` by it — the exact same
+      mechanism `rangeQuery` already used for the FilterBar's own prev/next
+      buttons, just continuous instead of a fixed step, so the real fetched
+      range changes and every chart on the page refetches. Only wired up for
+      modes with a fixed-length window (rolling7/week/month/sixMonths/year)
+      — ytd (grows from Jan 1), custom (has explicit date pickers), and all
+      (entire history) have nothing well-defined to shift, so `dragEnabled`
+      gates the prop to `undefined` there and the grab cursor doesn't even
+      appear. `FilterBar.tsx`'s prev/next buttons and range label — previously
+      only shown for rolling7/week — were generalized to all five shiftable
+      modes too (stepping by the window's own length, not a hardcoded 7 days,
+      since a 7-day click-step would take forever to page through a Year
+      view), both so month/6-month/year views have a visible range at all and
+      so the buttons and drag gesture behave consistently with each other.
+      Verified live via a Playwright script confirming: dragging right on a
+      rolling7 chart shifts the FilterBar's date label back exactly the
+      dragged fraction of 7 days; dragging on Month/Year charts shifts the
+      label back proportionally to 30/365 days; YTD shows no range label at
+      all and a drag there produces no date-range change (the only pixel
+      diff observed was Chart.js's own hover tooltip, not a real shift).
 - [x] Legends: audited every multi-series chart. PMC and Sleep already had
       real Chart.js legends; Pace/Cadence/HR Trend already had a manual JSX
       legend row (kept as-is — it labels which axis Pace belongs to, which a

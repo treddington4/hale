@@ -84,6 +84,25 @@ export function InsightsPage() {
   const rangeQuery = filter.mode === "all"
     ? { all: true }
     : { start: toDateInputValue(start), end: toDateInputValue(end) }
+
+  // Drag/swipe-to-scroll (ChartCanvas's onWindowDrag) shifts the FilterBar's
+  // anchor by a number of days proportional to how far the chart was dragged,
+  // then rangeQuery above (and every chart on this page) recomputes off the
+  // new anchor — same mechanism as FilterBar's own prev/next buttons, just
+  // continuous instead of a fixed 7-day step. Only meaningful for modes with a
+  // fixed-length window; ytd (grows from Jan 1), custom (has explicit date
+  // pickers), and all (the entire history) have nothing well-defined to shift.
+  const SHIFTABLE_MODES: FilterMode[] = ["rolling7", "week", "month", "sixMonths", "year"]
+  const dragEnabled = SHIFTABLE_MODES.includes(filter.mode)
+  const handleWindowDrag = (fraction: number) => {
+    if (!dragEnabled) return
+    const windowDays = Math.round((end.getTime() - start.getTime()) / 86400000) + 1
+    const shiftDays = Math.round(-fraction * windowDays)
+    if (shiftDays === 0) return
+    const today = todayMidnight()
+    const nextAnchor = addDays(filter.anchor, shiftDays)
+    setFilter((f) => ({ ...f, anchor: nextAnchor > today ? today : nextAnchor }))
+  }
   const runsQuery = useRuns(rangeQuery)
   const allRunsQuery = useAllRuns()
   const metricsQuery = useMetrics(rangeQuery)
@@ -529,7 +548,7 @@ export function InsightsPage() {
         sub="CTL (42d fitness) & ATL (7d fatigue) vs. threshold-HR-based training load; TSB (form) — positive means fresh, negative means fatigued"
         empty={!pmcConfig ? "Needs at least a couple of days of real training load (Phase 6.1's per-run TSS) to plot." : null}
       >
-        {pmcConfig && <ChartCanvas config={pmcConfig} height={220} />}
+        {pmcConfig && <ChartCanvas config={pmcConfig} height={220} onWindowDrag={dragEnabled ? handleWindowDrag : undefined} />}
       </ChartPanel>
 
       <FilterBar state={filter} onChange={setFilter} activityTypeCounts={activityTypeCounts} />
@@ -549,7 +568,7 @@ export function InsightsPage() {
           </ChartPanel>
 
           <ChartPanel title="Weekly Mileage" empty={!mileageConfig ? "Not enough data yet." : null}>
-            {mileageConfig && <ChartCanvas config={mileageConfig} height={160} />}
+            {mileageConfig && <ChartCanvas config={mileageConfig} height={160} onWindowDrag={dragEnabled ? handleWindowDrag : undefined} />}
           </ChartPanel>
 
           <ChartPanel
@@ -559,7 +578,7 @@ export function InsightsPage() {
           >
             {perfConfig && (
               <>
-                <ChartCanvas config={perfConfig} height={200} />
+                <ChartCanvas config={perfConfig} height={200} onWindowDrag={dragEnabled ? handleWindowDrag : undefined} />
                 <div className="text-muted-foreground mt-2 flex gap-4 text-xs">
                   <span className="flex items-center gap-1.5">
                     <span className="inline-block size-2 rounded-full" style={{ background: CHART_COLORS.gold }} />
@@ -583,7 +602,7 @@ export function InsightsPage() {
             sub="Distance-weighted average pace over the trailing week, smoothing out day-to-day noise"
             empty={!rollingPaceConfig ? "Need a couple more runs." : null}
           >
-            {rollingPaceConfig && <ChartCanvas config={rollingPaceConfig} height={160} />}
+            {rollingPaceConfig && <ChartCanvas config={rollingPaceConfig} height={160} onWindowDrag={dragEnabled ? handleWindowDrag : undefined} />}
           </ChartPanel>
 
           <ChartPanel
@@ -599,7 +618,7 @@ export function InsightsPage() {
             sub="Garmin wellness data"
             empty={!stepsConfig ? "No step data synced yet (Garmin-only)." : null}
           >
-            {stepsConfig && <ChartCanvas config={stepsConfig} height={140} />}
+            {stepsConfig && <ChartCanvas config={stepsConfig} height={140} onWindowDrag={dragEnabled ? handleWindowDrag : undefined} />}
           </ChartPanel>
 
           <ChartPanel
@@ -607,7 +626,7 @@ export function InsightsPage() {
             sub="Garmin wellness data"
             empty={!rhrConfig ? "No resting HR data synced yet (Garmin-only)." : null}
           >
-            {rhrConfig && <ChartCanvas config={rhrConfig} height={140} />}
+            {rhrConfig && <ChartCanvas config={rhrConfig} height={140} onWindowDrag={dragEnabled ? handleWindowDrag : undefined} />}
           </ChartPanel>
 
           <ChartPanel
@@ -615,7 +634,7 @@ export function InsightsPage() {
             sub="Garmin wellness data — updates periodically, not every day"
             empty={!vo2Config ? "No VO2 max data synced yet (Garmin-only)." : null}
           >
-            {vo2Config && <ChartCanvas config={vo2Config} height={140} />}
+            {vo2Config && <ChartCanvas config={vo2Config} height={140} onWindowDrag={dragEnabled ? handleWindowDrag : undefined} />}
           </ChartPanel>
 
           <ChartPanel
@@ -623,7 +642,7 @@ export function InsightsPage() {
             sub="Sleep score and total duration"
             empty={!sleepConfig ? "No sleep data synced yet (Garmin-only)." : null}
           >
-            {sleepConfig && <ChartCanvas config={sleepConfig} height={160} />}
+            {sleepConfig && <ChartCanvas config={sleepConfig} height={160} onWindowDrag={dragEnabled ? handleWindowDrag : undefined} />}
           </ChartPanel>
 
           <ChartPanel
