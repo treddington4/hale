@@ -4,7 +4,7 @@ import type { Run } from "@/lib/api"
 import { TYPE_COLORS } from "@/lib/runs"
 import { withAlpha } from "@/lib/color"
 import { paceStr, timeStr, tempColor, isPlausiblePace } from "@/lib/format"
-import { gapSecPerMi } from "@/lib/gap"
+import { gapSecPerMi, avgGapFromRoutePoints } from "@/lib/gap"
 import { isPlausibleHR } from "@/hooks/useHrFloor"
 import { Card } from "@/components/ui/card"
 import { Button } from "@/components/ui/button"
@@ -37,9 +37,14 @@ export function RunCard({
 }) {
   const type = run.type || "Easy"
   const typeColor = TYPE_COLORS[type] || "#8B93A1"
+  // Prefer the real per-point route data (accounts for actual descents, not just
+  // total climbing — see gap.ts's avgGapFromRoutePoints comment for why the
+  // gain-only shortcut below overstates GAP); fall back to it only when there's
+  // no usable GPS route (treadmill runs, or a run synced without route data).
   const gap =
-    run.elevGainFt != null && run.distanceMi && isPlausiblePace(run.avgPaceSecPerMi, run.distanceMi)
-      ? gapSecPerMi(run.avgPaceSecPerMi, run.elevGainFt, run.distanceMi)
+    isPlausiblePace(run.avgPaceSecPerMi, run.distanceMi) && run.distanceMi
+      ? (avgGapFromRoutePoints(run.routeMetrics) ??
+          (run.elevGainFt != null ? gapSecPerMi(run.avgPaceSecPerMi, run.elevGainFt, run.distanceMi) : null))
       : null
 
   const hasWeather = run.tempF != null || run.heatIndexF != null || run.wetBulbF != null

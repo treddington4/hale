@@ -2425,6 +2425,62 @@ given it was already scoped and promised rather than starting something new.
       correctness check before touching production.
 - [x] Commit: "Phase 6.3: gear lifecycle tracking"
 
+### 6.4 Bug fix: whole-run GAP overstated vs. Garmin — done
+User-reported: this app showed GAP 8:58/mi for a run where Garmin showed
+9:13/mi for the same run — a real, non-trivial (~15s/mi) discrepancy, not
+just two vendors' models disagreeing slightly.
+
+**Root cause**: `gapSecPerMi()` (`web/src/lib/gap.ts`, the one function this
+whole calc runs through for both `RunCard`'s whole-run badge and
+`SplitsTable`'s per-split figures — see CLAUDE.md's GAP note) infers one
+average "grade" for the distance by dividing total elevation *gain* by
+distance. Gain-only, with no descent subtracted — so any run with real
+descents (i.e. almost every outdoor run that isn't a one-way climb) reads as
+more net-uphill than it actually was, overstating the correction and
+understating GAP. For this specific run (a loop, start ≈ end elevation), the
+old method computed grade from 128ft of gain alone → +0.55% grade → 8:58/mi;
+the true net grade over the loop is close to 0%.
+
+**Real fix, not a patch**: `routeMetrics` (already computed and stored at
+sync time from the raw altitude+distance stream — see
+`strava.py`/`garmin_sync.py`'s route point builder) carries a genuine signed
+`gradePct` *per point*, already unused for this purpose. New
+`avgGapFromRoutePoints()` in `gap.ts` computes each point's own grade-
+adjusted result and averages across the whole route instead of collapsing
+the run to one grade number first — and critically, averages *speed*, not
+pace: points are captured at roughly uniform time intervals, not uniform
+distance, so a plain average of per-point *pace* over-weights slow stretches
+(hills, corners get more samples per mile) — confirmed on the real run this
+was reported against: naively averaging per-point pace gave 9:31/mi average
+(vs. the run's real 9:15/mi), and feeding that into a naive per-point GAP
+average landed at 9:38/mi, overshooting in the *other* direction. Averaging
+adjusted speed first, then inverting to pace at the end, is the correct
+time-weighted average and landed at 9:14/mi — matching Garmin's 9:13/mi
+within a single second. `RunCard.tsx` now calls this first, falling back to
+the old gain-only `gapSecPerMi()` only when there's no usable route (a
+treadmill run, or one synced without route data) — verified this fallback
+still works correctly and harmlessly (0ft elevation → GAP ≈ raw pace).
+**Not fixed, documented instead**: `SplitsTable`'s per-split GAP still uses
+the old gain-only method and carries a smaller version of the same bias —
+`routeMetrics` points don't carry a cumulative distance, so there's no
+reliable way to bucket them into mile splits client-side without a backend
+change (adding cumulative distance to the route point builder) *and*
+re-syncing every already-synced run to backfill it, since the raw stream
+data itself isn't persisted after sync. Left as a known, called-out
+follow-up rather than either silently leaving it inconsistent or scope-
+creeping into a bigger backend change under a "quick bug fix."
+- [x] Verified against the real, specific run the user reported (Strava
+      `strava_19438368185`, "Manchester - Base", 2026-07-23): pulled its real
+      `routeMetrics` from the live production API, hand-computed the old vs.
+      new formulas against it in a scratch script to confirm the exact
+      before/after numbers *before* writing any code, then confirmed the
+      live rendered value via a throwaway dev server pointed at the real
+      backend (read-only — this fix doesn't write anything, so no throwaway
+      DB copy was needed). `tsc -b --noEmit`/`oxlint`(one pre-existing
+      unrelated warning)/`npm run build` clean.
+- [x] Commit: "Fix GAP overstatement: average adjusted speed per route point,
+      not one whole-run gain-only grade"
+
 ---
 
 ## Phase 7 — Geospatial pipeline

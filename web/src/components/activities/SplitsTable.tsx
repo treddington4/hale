@@ -3,6 +3,11 @@ import { paceStr } from "@/lib/format"
 import { gapSecPerMi } from "@/lib/gap"
 import { isPlausibleHR } from "@/hooks/useHrFloor"
 
+// Per-split GAP still uses the gain-only shortcut (gapSecPerMi) — unlike
+// RunCard's whole-run badge (see gap.ts's avgGapFromRoutePoints), routeMetrics
+// points don't carry a cumulative distance, so there's no reliable way to
+// bucket them into mile splits client-side. Carries a smaller version of the
+// same overstatement bias as the whole-run figure did before that fix.
 export function SplitsTable({ splits, hrFloor }: { splits: RunSplit[]; hrFloor: number }) {
   const paces = splits.map((s) => s.paceSecPerMi || 0)
   const maxPace = Math.max(...paces)
