@@ -25,11 +25,24 @@ succeeding. Named exercises only render correctly on activities Garmin considers
     duplicate in Garmin Connect themselves) deletes the original. discard_preview()
     removes the duplicate instead, leaving the original untouched -- either way
     nothing real is ever lost without the user's explicit say-so.
-  - No match (nothing recorded on Garmin for this workout at all): nothing to
-    replace or lose, so create_new() just uploads it directly, no confirm step --
-    HR is not fused in (there's no watch recording to pull it from), an accepted
+  - No match (nothing recorded on Garmin at all): nothing to replace or lose,
+    so create_new() just uploads it directly, no confirm step -- HR is not
+    fused in (there's no watch recording to pull it from), an accepted
     tradeoff since the exercise/weight/rep data is the actual point.
+
+When a match exists, the original watch activity's real per-second HR stream is
+pulled from its downloaded FIT file (garmin_sync._download_fit_bytes/
+_parse_fit_records, the same raw-device-recording path used elsewhere in this
+codebase for route data) and fused into the duplicate's generated FIT, so Avg/Max
+HR carry over. Garmin's own derived physiological metrics on the original (Training
+Effect, Exercise Load, Respiration Rate, Est. Sweat Loss, Recovery HR) come from
+proprietary on-device sensor processing (respiration/stress sensors, Garmin's
+Firstbeat algorithm) that a synthetic re-uploaded FIT cannot reproduce even with a
+real HR stream embedded -- those are expected to stay blank on the duplicate; only
+HR-derived fields (Avg/Max HR, and whatever calorie estimate hevy2garmin computes
+from the HR stream) carry over.
 """
+import io
 import os
 import tempfile
 from datetime import datetime, timedelta
@@ -97,14 +110,40 @@ def _fetch_raw_hevy_workout(user_id: str, hevy_run_id: str) -> dict:
     return hevy_sync._request(api_key, f"/workouts/{_hevy_workout_id(hevy_run_id)}")
 
 
-def _build_and_upload(client, workout: dict, exclude_activity_ids=None, progress_cb=None) -> dict:
+def _fetch_original_hr_samples(client, activity_id: int) -> list | None:
+    """Real per-second HR from the original watch-recorded activity's own FIT file
+    (not a re-derived summary), so the duplicate upload can carry the same Avg/Max
+    HR instead of showing no heart-rate data at all. Reuses garmin_sync's existing
+    FIT-download/record-parse path (already used there for route data) rather than
+    a second implementation. Returns None (not an error) if the original has no HR
+    records -- e.g. no HR strap/watch-on-wrist that session -- so callers just fall
+    back to no HR, same as the no-match path."""
+    fit_bytes = garmin_sync._download_fit_bytes(client, activity_id)
+    if not fit_bytes:
+        return None
+    try:
+        import fitparse
+        fit = fitparse.FitFile(io.BytesIO(fit_bytes))
+        points = garmin_sync._parse_fit_records(fit)
+    except Exception:
+        return None
+    hr_points = [p for p in points if p.get("hr") is not None and p.get("t") is not None]
+    if not hr_points:
+        return None
+    t0 = hr_points[0]["t"]
+    return [{"time": (p["t"] - t0).total_seconds(), "hr": p["hr"]} for p in hr_points]
+
+
+def _build_and_upload(client, workout: dict, exclude_activity_ids=None, hr_samples=None, progress_cb=None) -> dict:
     def _p(msg):
         if progress_cb:
             progress_cb(msg)
     _p(f"Generating FIT file for \"{workout.get('title') or 'Workout'}\"…")
+    if hr_samples:
+        _p(f"Fusing in {len(hr_samples)} real HR samples from the original activity")
     with tempfile.TemporaryDirectory() as tmp:
         fit_path = os.path.join(tmp, "workout.fit")
-        h2g_fit.generate_fit(workout, None, fit_path)  # hr_samples=None -- see module docstring
+        h2g_fit.generate_fit(workout, hr_samples, fit_path)
         _p("Uploading to Garmin Connect…")
         result = h2g_garmin.upload_fit(
             client, fit_path,
@@ -152,10 +191,17 @@ def preview_push(user_id: str, hevy_run_id: str, progress_cb=None) -> dict:
     workout = _fetch_raw_hevy_workout(user_id, hevy_run_id)
     _p("Logging into Garmin…")
     client = garmin_sync._login(user_id)
+    _p("Fetching the original activity's recorded heart-rate data…")
+    hr_samples = _fetch_original_hr_samples(client, original_activity_id)
+    if not hr_samples:
+        _p("No HR data found on the original activity — continuing without it")
     # Excludes the original from the post-upload "find by start time" lookup --
     # both activities share nearly the same start time, so without this the
     # lookup could mistake the pre-existing original for the just-created upload.
-    result = _build_and_upload(client, workout, exclude_activity_ids=[original_activity_id], progress_cb=progress_cb)
+    result = _build_and_upload(
+        client, workout, exclude_activity_ids=[original_activity_id],
+        hr_samples=hr_samples, progress_cb=progress_cb,
+    )
     _p("Preview ready — review it in Garmin Connect before confirming")
     return {
         "previewActivityId": result.get("activity_id"),
