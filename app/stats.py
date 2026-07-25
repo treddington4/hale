@@ -709,12 +709,19 @@ def backfill_run_metrics(db, user_id: str = DEFAULT_USER_ID) -> int:
     return len(runs)
 
 
-# Ride is the only non-foot-strike activity type this app really sees (see
-# CLAUDE.md — this is primarily a running app); everything else (Run, Walk,
-# Hike, treadmill variants, ...) wears shoes. A finer per-activity_type mapping
-# isn't worth it until a real second non-shoe, non-bike activity shows up.
-def _gear_kind_for_activity(activity_type: str) -> str:
-    return "bike" if activity_type == "Ride" else "shoe"
+# Ride is the only non-foot-strike distance activity type this app really sees
+# (see CLAUDE.md — this is primarily a running app); everything else distance-
+# based (Run, Walk, Hike, treadmill variants, ...) wears shoes. Strength/weight
+# training isn't a shoe-or-bike activity at all — returns None so
+# assign_default_gear skips it entirely (a real bug until this fix: any
+# strength_training/WeightTraining row, Garmin- or Hevy-sourced, was silently
+# falling into the "shoe" bucket and getting a running shoe auto-assigned).
+def _gear_kind_for_activity(activity_type: str) -> str | None:
+    if activity_type == "Ride":
+        return "bike"
+    if "strength" in (activity_type or "").lower() or "weight" in (activity_type or "").lower():
+        return None
+    return "shoe"
 
 
 def assign_default_gear(db, run: Run, user_id: str = DEFAULT_USER_ID) -> None:
@@ -727,6 +734,8 @@ def assign_default_gear(db, run: Run, user_id: str = DEFAULT_USER_ID) -> None:
     if run.gear_id:
         return
     kind = _gear_kind_for_activity(run.activity_type)
+    if kind is None:
+        return
     default = (
         db.query(Gear)
         .filter(owned_by(Gear.user_id, user_id), Gear.kind == kind, Gear.is_default.is_(True), Gear.retired_date.is_(None))

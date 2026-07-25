@@ -1,6 +1,12 @@
 """Sync endpoints: quick "Sync Now" (background job w/ live status), full backlog sync
 (same job shape, much longer-running), Garmin export import, sync_meta history, and
-per-user provider credentials (Settings → Connections)."""
+per-user provider credentials (Settings → Connections).
+
+Per-source behavior (credential checks, quick sync, backlog sync, the scheduled
+auto-sync loop) dispatches through app/sync/registry.py's INTEGRATIONS table instead
+of an if/elif chain per source name -- see that module's own docstring for why, and
+for why Garmin's backlog sync keeps its rate-limit retry loop here as a deliberate
+special case rather than being folded into the generic path."""
 import os
 import time
 import threading
@@ -10,13 +16,13 @@ from fastapi import APIRouter, HTTPException, Request, UploadFile, File, Depends
 
 from ..models import SessionLocal, ProviderCredential, get_sync_meta, set_sync_meta, user_key
 from ..accounts import auth
-from ..sync import strava
+from ..sync import garmin_sync, hevy_sync
+from ..sync.registry import INTEGRATIONS, SYNC_LIMIT
 from .. import stats
 
 router = APIRouter()
 
 SYNC_INTERVAL_HOURS = int(os.environ.get("SYNC_INTERVAL_HOURS", "6"))
-SYNC_LIMIT = int(os.environ.get("SYNC_ACTIVITY_LIMIT", "10"))
 
 
 def _next_auto_sync_time():
@@ -52,31 +58,30 @@ def _users_with_credential(provider: str):
 
 
 def _auto_sync():
-    """Runs for every user with a Strava credential on file, not just one hardcoded
-    account — today that's still just DEFAULT_USER_ID in practice (no real login exists
-    yet), but the loop itself is already correct for whenever there's more than one."""
+    """Runs every auto-sync-eligible integration (official/documented APIs — Strava,
+    Hevy; Garmin is manual-only, see registry.py's own auto_sync_eligible flags) for
+    every user with a credential on file, not just one hardcoded account — today
+    that's still just DEFAULT_USER_ID in practice (no real login exists yet), but the
+    loop is already correct for whenever there's more than one."""
     import logging
     log = logging.getLogger("runlog")
-    for user_id in _users_with_credential("strava"):
-        set_sync_meta(user_key(user_id, "strava_last_error"), "")
-        try:
-            n = strava.sync_activities(user_id, limit=SYNC_LIMIT)
-            stats.record_sync("strava", user_id, count=n)
-            log.info(f"Auto-sync: upserted {n} runs from Strava for {user_id}")
-        except Exception as e:
-            stats.record_sync("strava", user_id, error=str(e))
-            log.warning(f"Auto-sync skipped for {user_id}: {e}")
+    for source, integration in INTEGRATIONS.items():
+        if not integration.auto_sync_eligible:
+            continue
+        for user_id in _users_with_credential(source):
+            set_sync_meta(user_key(user_id, f"{source}_last_error"), "")
+            try:
+                n = integration.sync_recent(user_id)
+                stats.record_sync(source, user_id, count=n)
+                log.info(f"Auto-sync: upserted {n} from {source} for {user_id}")
+            except Exception as e:
+                stats.record_sync(source, user_id, error=str(e))
+                log.warning(f"Auto-sync skipped for {user_id}/{source}: {e}")
 
 
 def _has_credential(user_id: str, provider: str) -> bool:
-    db = SessionLocal()
-    try:
-        cred = db.query(ProviderCredential).filter_by(user_id=user_id, provider=provider).first()
-        if provider == "garmin":
-            return bool(cred and cred.username and cred.password)
-        return bool(cred and cred.access_token)
-    finally:
-        db.close()
+    integration = INTEGRATIONS.get(provider)
+    return bool(integration and integration.has_credential(user_id))
 
 
 def _reject_if_demo(user_id: str):
@@ -100,7 +105,7 @@ _QUICK_SYNC_LOG_LIMIT = 50
 _quick_sync_lock = threading.Lock()
 # Keyed by (user_id, source) rather than a source-only dict (Phase 1.4) — lazily
 # created on first use via _get_quick_sync_job, since the set of real users isn't
-# known ahead of time the way the 2 fixed sources were.
+# known ahead of time the way the fixed sources were.
 _quick_sync_jobs: dict = {}
 
 
@@ -124,11 +129,7 @@ def _quick_sync_progress(user_id: str, source: str, msg: str, count: int = None)
 def _run_quick_sync(user_id: str, source: str):
     try:
         cb = lambda msg, count=None: _quick_sync_progress(user_id, source, msg, count)
-        if source == "strava":
-            n = strava.sync_activities(user_id, limit=SYNC_LIMIT, progress_cb=cb)
-        else:
-            from ..sync import garmin_sync
-            n = garmin_sync.sync_garmin_activities(user_id, limit=SYNC_LIMIT, progress_cb=cb)
+        n = INTEGRATIONS[source].sync_recent(user_id, cb)
         with _quick_sync_lock:
             job = _get_quick_sync_job(user_id, source)
             job["status"] = "done"
@@ -152,7 +153,7 @@ def _run_quick_sync(user_id: str, source: str):
 
 @router.post("/api/sync/{source}")
 def manual_sync(source: str, user_id: str = Depends(auth.current_user_id)):
-    if source not in ("strava", "garmin"):
+    if source not in INTEGRATIONS:
         raise HTTPException(404, "Unknown source")
 
     from ..accounts import demo
@@ -173,10 +174,9 @@ def manual_sync(source: str, user_id: str = Depends(auth.current_user_id)):
                         "startedAt": now_iso, "finishedAt": now_iso, "error": None})
         return {"status": "started"}
 
-    if source == "strava" and not strava.get_valid_access_token(user_id):
-        raise HTTPException(400, "Not authenticated with Strava — visit /auth/strava/login first")
-    if source == "garmin" and not _has_credential(user_id, "garmin"):
-        raise HTTPException(400, "Add your Garmin credentials in Settings → Connections to use this")
+    integration = INTEGRATIONS[source]
+    if not integration.has_credential(user_id):
+        raise HTTPException(400, integration.missing_credential_message)
 
     with _quick_sync_lock:
         job = _get_quick_sync_job(user_id, source)
@@ -192,7 +192,7 @@ def manual_sync(source: str, user_id: str = Depends(auth.current_user_id)):
 
 @router.get("/api/sync/{source}/status")
 def quick_sync_status(source: str, user_id: str = Depends(auth.current_user_id)):
-    if source not in ("strava", "garmin"):
+    if source not in INTEGRATIONS:
         raise HTTPException(404, "Unknown source")
     with _quick_sync_lock:
         return dict(_get_quick_sync_job(user_id, source))
@@ -225,7 +225,7 @@ def sync_meta(user_id: str = Depends(auth.current_user_id)):
             "lastCount": int(count) if count is not None else None,
             "lastError": get_sync_meta(user_key(user_id, f"{source}_last_error")) or None,
         }
-    return {"strava": info("strava"), "garmin": info("garmin")}
+    return {source: info(source) for source in INTEGRATIONS}
 
 
 # ---------- Backlog sync (full history, runs as a background job) ----------
@@ -250,16 +250,15 @@ def _backlog_progress(user_id: str, source: str, msg: str, count: int = None):
 
 def _run_backlog_sync(user_id: str, source: str):
     try:
-        if source == "strava":
-            n = strava.sync_all_activities(user_id, progress_cb=lambda msg, count=None: _backlog_progress(user_id, source, msg, count))
-        else:
-            from ..sync import garmin_sync
+        if source == "garmin":
             # Auto-continue through rate limits instead of stopping and requiring a
             # manual re-click: this thread is already backgrounded, so waiting out the
             # cooldown (garmin_sync's own exponential backoff, 5min base, capped at 4h)
             # and retrying in place is strictly better than surfacing an error the user
             # has to notice and act on. Only a genuinely non-rate-limit failure (bad
-            # credentials, a real bug) still propagates immediately below.
+            # credentials, a real bug) still propagates immediately below. Deliberately
+            # not dispatched through INTEGRATIONS[source].sync_all — see registry.py's
+            # own docstring on why this stays a special case here.
             total = 0
             while True:
                 base = total
@@ -280,6 +279,10 @@ def _run_backlog_sync(user_id: str, source: str):
                     )
                     time.sleep(wait)
             n = total
+        else:
+            n = INTEGRATIONS[source].sync_all(
+                user_id, lambda msg, count=None: _backlog_progress(user_id, source, msg, count),
+            )
         with _backlog_lock:
             job = _get_backlog_job(user_id, source)
             job["status"] = "done"
@@ -304,7 +307,7 @@ def _run_backlog_sync(user_id: str, source: str):
 
 @router.post("/api/sync/{source}/backlog")
 def start_backlog_sync(source: str, user_id: str = Depends(auth.current_user_id)):
-    if source not in ("strava", "garmin"):
+    if source not in INTEGRATIONS:
         raise HTTPException(404, "Unknown source")
 
     from ..accounts import demo
@@ -322,10 +325,9 @@ def start_backlog_sync(source: str, user_id: str = Depends(auth.current_user_id)
                         "startedAt": now_iso, "finishedAt": now_iso, "error": None})
         return {"status": "started"}
 
-    if source == "strava" and not strava.get_valid_access_token(user_id):
-        raise HTTPException(400, "Not authenticated with Strava — visit /auth/strava/login first")
-    if source == "garmin" and not _has_credential(user_id, "garmin"):
-        raise HTTPException(400, "Add your Garmin credentials in Settings → Connections to use this")
+    integration = INTEGRATIONS[source]
+    if not integration.has_credential(user_id):
+        raise HTTPException(400, integration.missing_credential_message)
 
     with _backlog_lock:
         job = _get_backlog_job(user_id, source)
@@ -346,7 +348,7 @@ def start_backlog_sync(source: str, user_id: str = Depends(auth.current_user_id)
 
 @router.get("/api/sync/{source}/backlog/status")
 def backlog_status(source: str, user_id: str = Depends(auth.current_user_id)):
-    if source not in ("strava", "garmin"):
+    if source not in INTEGRATIONS:
         raise HTTPException(404, "Unknown source")
     with _backlog_lock:
         job = dict(_get_backlog_job(user_id, source))
@@ -384,6 +386,12 @@ def garmin_route_diagnostics(user_id: str = Depends(auth.current_user_id)):
         db.close()
 
 
+# ---------- Hevy status ----------
+@router.get("/api/hevy/status")
+def hevy_status(user_id: str = Depends(auth.current_user_id)):
+    return {"configured": _has_credential(user_id, "hevy")}
+
+
 # ---------- Connections (per-user provider credentials — Settings tab) ----------
 @router.get("/api/connections")
 def get_connections(user_id: str = Depends(auth.current_user_id)):
@@ -411,6 +419,33 @@ async def set_garmin_connection(request: Request, user_id: str = Depends(auth.cu
             db.add(cred)
         cred.username = username
         cred.password = password
+        db.commit()
+        return {"status": "saved"}
+    finally:
+        db.close()
+
+
+@router.post("/api/connections/hevy")
+async def set_hevy_connection(request: Request, user_id: str = Depends(auth.current_user_id)):
+    _reject_if_demo(user_id)
+    body = await request.json()
+    api_key = (body.get("apiKey") or "").strip()
+    if not api_key:
+        raise HTTPException(400, "apiKey is required")
+    try:
+        hevy_sync.validate_api_key(api_key)
+    except hevy_sync.HevyAuthError as e:
+        raise HTTPException(400, str(e))
+    except Exception as e:
+        raise HTTPException(400, f"Couldn't reach Hevy to validate this key: {e}")
+    db = SessionLocal()
+    try:
+        cred = db.query(ProviderCredential).filter_by(user_id=user_id, provider="hevy").first()
+        if not cred:
+            cred = ProviderCredential(user_id=user_id, provider="hevy",
+                                       created_at=datetime.now(timezone.utc).isoformat())
+            db.add(cred)
+        cred.access_token = api_key
         db.commit()
         return {"status": "saved"}
     finally:

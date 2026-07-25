@@ -2481,6 +2481,120 @@ creeping into a bigger backend change under a "quick bug fix."
 - [x] Commit: "Fix GAP overstatement: average adjusted speed per route point,
       not one whole-run gain-only grade"
 
+### 6.5 Hevy strength-workout sync — done
+User-requested: auto-sync logged Hevy workouts (sets/reps/weight) via Hevy's
+official `/v1` API, gated behind a personal API key (Hevy Pro only). Real
+API shapes (auth header, endpoints, field casing, the events-based delta
+mechanism) were confirmed directly against the user's own already-connected
+Hevy MCP server before writing any backend code, rather than guessing from
+the (JS-rendered, unscrapable) Swagger docs page — this also explained a
+real mystery: one of the user's actual Hevy workouts was titled "RunLog:
+Active Recovery — Mobility, Core, Stretch (2026-07-19)", which looked like
+evidence of an existing push-to-Hevy feature. There wasn't one — the user
+confirmed it was residue from an *earlier* session using the Hevy MCP's
+`create-workout` tool to capture a real routine shape for schema design
+(see Phase 4.4's `StrengthStep` comment citing "an actual captured Hevy API
+response"), not a real feature or user workflow. The user explicitly did
+not want an MCP dependency for the real feature — this is a plain
+`requests`-based HTTP client in `app/sync/hevy_sync.py`, no MCP involved at
+runtime.
+- [x] **Common integration-sync interface (`app/sync/registry.py`)** — added
+      after the user asked for one specifically, mid-implementation, having
+      noticed `routes/sync.py`'s per-source if/elif chains (credential
+      checks, quick sync, backlog sync, the auto-sync loop) were about to
+      grow a third repetition and would keep growing with any future
+      integration. Clarified first that this does *not* need a new
+      "integrations" table — `ProviderCredential` already is that generic
+      per-user-per-provider table (`provider: "strava"|"garmin"|"hevy"|...`,
+      by its own pre-existing docstring, already anticipating "future
+      Google Health/Withings/..."); Hevy's API key is just a new
+      `provider="hevy"` row reusing the existing `access_token` column
+      Strava's OAuth token already uses. What *was* missing was the
+      dispatch layer: `registry.py`'s `INTEGRATIONS` dict normalizes each
+      provider module's own differently-named functions
+      (`strava.sync_activities`, `garmin_sync.sync_garmin_activities`,
+      `hevy_sync.sync_hevy_workouts`, deliberately *not* renamed to avoid
+      rippling into every existing call site) into one common shape
+      (`has_credential`, `sync_recent`, `sync_all`, `auto_sync_eligible`,
+      `missing_credential_message`) that `routes/sync.py` dispatches
+      through generically instead of branching per source name. Garmin's
+      backlog sync keeps its rate-limit-aware retry loop as a deliberate,
+      clearly-commented exception in `routes/sync.py` rather than being
+      force-fit into the uniform interface — genuinely different behavior
+      (auto-retry through a real cooldown backoff), not just a differently
+      named function.
+- [x] **`app/sync/hevy_sync.py`** — one `Run` row per Hevy workout
+      (`hevy_<id>`, `source="hevy"`, `activity_type="WeightTraining"` —
+      matching Strava's own strength-activity string so
+      `lib/runs.ts`'s `activityFamily()` substring match picks it up
+      identically). Every field read goes through a small `_field(d, *names)`
+      helper trying both casings, since the MCP-observed real API returned
+      camelCase on the plain workouts list but snake_case on the events
+      (delta-sync) endpoint for what's presumably the same underlying data —
+      rather than assume one casing convention holds everywhere.
+      - **Incremental sync** (`sync_hevy_workouts`, used for both "Sync Now"
+        and the scheduled auto-sync): pages `/workouts/events?since=<last
+        sync>`, handling both `"updated"` (upsert) and `"deleted"` (remove
+        the matching Run) events — mirrors this codebase's established
+        "only fetch what's new" discipline (Strava's `after=`, Garmin's
+        `detail_synced_at` dedup) instead of re-fetching everything.
+      - **Backlog sync** (`sync_all_hevy_workouts`): paginates the plain
+        `/workouts` list instead, unbounded by "since".
+      - **Auto-sync eligible**, unlike Garmin — Hevy's API is official and
+        documented (confirmed live: a deliberately-wrong API key got a
+        clean 401/403 rejection, not a timeout or malformed response),
+        so it runs on the same scheduled interval as Strava rather than
+        Garmin's manual-only treatment.
+      - `exercise_sets_json` reuses the *exact* `{exercise, setType, reps,
+        weightLb, durationSec, supersetGroup}` contract Garmin's own
+        `_fetch_exercise_sets` already populates (see `ExerciseSetsTable.tsx`)
+        — except Hevy actually has real `setType` (warmup/dropset/failure)
+        and superset data, which Garmin's own sync leaves `null` for every
+        set. `_guess_strength_type()` lightly substring-matches a Hevy
+        workout's free-text title (e.g. "Full Body", "Upper body") against
+        this app's existing `STRENGTH_TYPES` options, falling back to
+        "Other" — always editable afterward, same heuristic-with-honest-
+        fallback discipline as `classify_run_type` elsewhere.
+      - `validate_api_key()` hits `/workouts/count` so a bad key is caught
+        immediately when saving the connection in Settings, not just on the
+        next scheduled sync.
+- [x] **Real bug found and fixed along the way**:
+      `stats._gear_kind_for_activity` (Phase 6.3) mapped *any* non-Ride
+      activity to `"shoe"`, meaning a strength_training/WeightTraining run —
+      Garmin-sourced ones already existed in production, and Hevy was about
+      to make this the common case — would silently get a running shoe
+      auto-assigned as gear. Fixed by returning `None` for any
+      strength/weight activity type, which `assign_default_gear` now
+      correctly treats as "not a gear-tracked activity" and skips entirely.
+- [x] **Settings UI** — new `HevySection` (API key input, status, "Sync
+      Now"/"Run Backlog Sync" reusing the existing generic `SyncControls`
+      component unchanged, since it's already keyed on `SyncSource` and Hevy
+      needed no special-casing there). `api.saveHevyConnection` bypasses the
+      generic `request<T>()` helper (matching the existing `SyncStartResult`
+      pattern) specifically so a rejected key's real "check your API key"
+      message reaches the user instead of a bare "POST .../hevy failed: 400".
+- [x] Verified in stages against a throwaway copy of the real production DB
+      (never touching real production before confirming behavior):
+      backend endpoints directly via curl (hevy status, sync-meta now
+      including all three sources, 400 with a clear message when
+      unconfigured, 404 for an unknown source, and critically — saving a
+      deliberately-wrong API key produced a genuine 401/403-derived
+      rejection from the *real* Hevy API, confirming the base URL/auth
+      header/endpoint path are all correct); confirmed the Strava/Garmin
+      paths were unaffected by the registry refactor (status, connections
+      list, both still correct); then a full matched frontend+backend
+      throwaway container for the actual Settings UI (screenshotted,
+      renders correctly, no console errors) and a synthetic Hevy-shaped
+      `Run` row inserted directly in the *throwaway* DB only to confirm
+      `ExerciseSetsTable` renders the warmup badge, superset divider, and
+      dropset/duration-based "hold" sets correctly end-to-end before any
+      real Hevy data ever flows through. `tsc -b --noEmit`/`oxlint`(one
+      pre-existing unrelated warning)/`npm run build` and a full Docker
+      image build all clean. The user will add their own real Hevy API key
+      through the deployed Settings UI themselves once notified — never
+      typed into this chat.
+- [x] Commit: "Phase 6.5: Hevy strength-workout sync + common integration registry"
+
 ---
 
 ## Phase 7 — Geospatial pipeline

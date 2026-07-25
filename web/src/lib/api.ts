@@ -476,6 +476,12 @@ export interface GarminStatus {
   configured: boolean
 }
 
+export interface HevyStatus {
+  configured: boolean
+}
+
+export type HevyConnectionResult = { ok: true } | { ok: false; message: string }
+
 export interface SyncMetaInfo {
   lastSyncedAt: string | null
   lastCount: number | null
@@ -485,6 +491,7 @@ export interface SyncMetaInfo {
 export interface SyncMeta {
   strava: SyncMetaInfo
   garmin: SyncMetaInfo
+  hevy: SyncMetaInfo
 }
 
 export interface Connection {
@@ -499,7 +506,7 @@ export interface RouteDiagnostics {
   unknown: number
 }
 
-export type SyncSource = "strava" | "garmin"
+export type SyncSource = "strava" | "garmin" | "hevy"
 
 export interface SyncJob {
   status: "idle" | "running" | "done" | "error"
@@ -585,6 +592,7 @@ export const api = {
 
   stravaStatus: () => request<StravaStatus>("/api/strava/status"),
   garminStatus: () => request<GarminStatus>("/api/garmin/status"),
+  hevyStatus: () => request<HevyStatus>("/api/hevy/status"),
   syncMeta: () => request<SyncMeta>("/api/sync/meta"),
   connections: () => request<Connection[]>("/api/connections"),
   routeDiagnostics: () => request<RouteDiagnostics>("/api/garmin/route-diagnostics"),
@@ -597,6 +605,26 @@ export const api = {
     }),
   deleteConnection: (provider: string) =>
     request<{ deleted: boolean }>(`/api/connections/${provider}`, { method: "DELETE" }),
+  // Bypasses request<T>() (see SyncStartResult above) so a rejected API key's real
+  // "check your key / requires Hevy Pro" message reaches the user instead of a
+  // bare "POST .../hevy failed: 400".
+  saveHevyConnection: async (apiKey: string): Promise<HevyConnectionResult> => {
+    try {
+      const res = await fetch("/api/connections/hevy", {
+        method: "POST",
+        headers: { "Content-Type": "application/json", ...demoAuthHeader() },
+        body: JSON.stringify({ apiKey }),
+      })
+      handleUnauthorized(res)
+      if (!res.ok) {
+        const data = await res.json().catch(() => ({}))
+        return { ok: false, message: data.detail || "Failed to save Hevy connection" }
+      }
+      return { ok: true }
+    } catch {
+      return { ok: false, message: "Failed to save Hevy connection" }
+    }
+  },
   setCoachPersonality: (personality: CoachPersonality) =>
     request<{ personality: CoachPersonality }>("/api/coach/personality", {
       method: "POST",

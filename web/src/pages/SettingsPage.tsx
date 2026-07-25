@@ -2,6 +2,7 @@ import { useState, useEffect, type ReactNode } from "react"
 import {
   useStravaStatus,
   useGarminStatus,
+  useHevyStatus,
   useSyncMeta,
   useConnections,
   useRouteDiagnostics,
@@ -204,6 +205,80 @@ function GarminImportSection() {
         ) : (
           <div className="text-hale-hot mt-2 text-xs">{garminImport.data.message}</div>
         ))}
+    </SettingsSection>
+  )
+}
+
+function HevySection() {
+  const { data: config } = useConfig()
+  const { data: status } = useHevyStatus()
+  const { data: syncMeta } = useSyncMeta()
+  const { data: connections } = useConnections()
+  const { saveHevyConnection, deleteConnection } = useSettingsMutations()
+  const [apiKey, setApiKey] = useState("")
+
+  const hevyConn = connections?.find((c) => c.provider === "hevy")
+  const saveFailed = saveHevyConnection.data && !saveHevyConnection.data.ok ? saveHevyConnection.data.message : null
+
+  if (config?.isDemoUser) {
+    return (
+      <SettingsSection title={<>Hevy <span className="text-hale-faint font-normal">(requires Hevy Pro)</span></>}>
+        <div className="text-hale-faint text-xs">Not available in the demo.</div>
+      </SettingsSection>
+    )
+  }
+
+  return (
+    <SettingsSection title={<>Hevy <span className="text-hale-faint font-normal">(requires Hevy Pro)</span></>}>
+      <div className="text-hale-faint pb-2 text-xs">
+        Auto-syncs your logged strength workouts (sets, reps, weight) as Runs. Get your API key from the Hevy app
+        under Settings → API (Pro only).
+      </div>
+      <SettingsRow
+        label="Status"
+        value={
+          <span className="inline-flex items-center font-sans font-normal">
+            <StatusDot color={status?.configured ? "var(--hale-good)" : "var(--hale-faint)"} />
+            {status?.configured ? "Configured" : "Not configured"}
+          </span>
+        }
+      />
+      <SettingsRow label="Last synced" value={fmtMeta(syncMeta?.hevy)} />
+      {syncMeta?.hevy.lastError && (
+        <SettingsRow label="Last error" value={<span className="text-hale-hot">{syncMeta.hevy.lastError}</span>} />
+      )}
+
+      {status?.configured ? (
+        <Button
+          variant="link"
+          size="sm"
+          className="mt-2 h-auto p-0"
+          onClick={() => deleteConnection.mutate("hevy")}
+        >
+          Remove connection
+        </Button>
+      ) : (
+        <div className="mt-2.5 flex flex-col gap-1.5">
+          <Label>API key</Label>
+          <Input
+            type="password"
+            placeholder={hevyConn ? "••••••••" : "Paste your Hevy API key"}
+            value={apiKey}
+            onChange={(e) => setApiKey(e.target.value)}
+          />
+          <Button
+            size="sm"
+            className="mt-1 self-start"
+            disabled={!apiKey || saveHevyConnection.isPending}
+            onClick={() => saveHevyConnection.mutate(apiKey.trim(), { onSuccess: () => setApiKey("") })}
+          >
+            {saveHevyConnection.isPending ? "Validating…" : "Save connection"}
+          </Button>
+          {saveFailed && <div className="text-hale-hot text-xs">{saveFailed}</div>}
+        </div>
+      )}
+
+      <SyncControls source="hevy" enabled={!!status?.configured} />
     </SettingsSection>
   )
 }
@@ -725,6 +800,7 @@ export function SettingsPage() {
       <StravaSection />
       <GarminSection />
       <GarminImportSection />
+      <HevySection />
       <ConnectionsSection />
       <TokensSection />
       <CoachSection />

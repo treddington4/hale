@@ -9,6 +9,10 @@ export function useGarminStatus() {
   return useQuery({ queryKey: ["garminStatus"], queryFn: api.garminStatus })
 }
 
+export function useHevyStatus() {
+  return useQuery({ queryKey: ["hevyStatus"], queryFn: api.hevyStatus })
+}
+
 export function useSyncMeta() {
   return useQuery({ queryKey: ["syncMeta"], queryFn: api.syncMeta })
 }
@@ -87,7 +91,17 @@ export function useSettingsMutations() {
     mutationFn: (provider: string) => api.deleteConnection(provider),
     onSuccess: () => {
       qc.invalidateQueries({ queryKey: ["garminStatus"] })
+      qc.invalidateQueries({ queryKey: ["hevyStatus"] })
       qc.invalidateQueries({ queryKey: ["connections"] })
+    },
+  })
+  const saveHevyConnection = useMutation({
+    mutationFn: (apiKey: string) => api.saveHevyConnection(apiKey),
+    onSuccess: (result) => {
+      if (result.ok) {
+        qc.invalidateQueries({ queryKey: ["hevyStatus"] })
+        qc.invalidateQueries({ queryKey: ["connections"] })
+      }
     },
   })
   const setCoachPersonality = useMutation({
@@ -112,7 +126,7 @@ export function useSettingsMutations() {
   })
 
   return {
-    manualSync, backlogSync, saveGarminConnection, deleteConnection, setCoachPersonality, garminImport,
+    manualSync, backlogSync, saveGarminConnection, saveHevyConnection, deleteConnection, setCoachPersonality, garminImport,
     createToken, deleteToken,
   }
 }
