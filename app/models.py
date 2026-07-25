@@ -176,6 +176,34 @@ class DailySteps(Base):
     garmin_acwr_status = Column(String, nullable=True)  # Garmin's own label verbatim, e.g. "OPTIMAL"
     garmin_training_status_phrase = Column(String, nullable=True)  # e.g. "MAINTAINING_2"
 
+    # Phase 24.2 — Garmin's own composite daily Training Readiness (get_training_readiness()),
+    # a direct cross-check against this app's own stats.readiness() -- same "different
+    # algorithm, different data source, comparable concept" relationship as the training
+    # load fields above. Real sub-factor breakdown (sleep/recovery/HRV/stress/ACWR),
+    # each already a percent+feedback pair in Garmin's own response, so stored as-is
+    # rather than re-deriving our own composite from the raw factors.
+    training_readiness_score = Column(Integer, nullable=True)  # 0-100
+    training_readiness_level = Column(String, nullable=True)  # e.g. "MODERATE"
+    training_readiness_feedback = Column(String, nullable=True)  # e.g. "LISTEN_TO_YOUR_BODY"
+
+    # Phase 24.2 — Body Battery (get_body_battery()): daily charged/drained plus the
+    # full intraday [[timestamp_ms, value]] series, stored (not just the daily summary)
+    # specifically so a later per-activity feature can look up the value right before/
+    # after a given Run's time window without a second API call -- same
+    # store-the-raw-timeline-now, derive-per-activity-later precedent as
+    # sleep_stages_json above.
+    body_battery_charged = Column(Integer, nullable=True)
+    body_battery_drained = Column(Integer, nullable=True)
+    body_battery_json = Column(Text, default="[]")
+
+    # Phase 24.2 — daily stress (get_all_day_stress()): documented, clean daily
+    # avg/max, unlike the undocumented per-activity avg_stress FIT field found
+    # earlier. No intraday array stored -- stress during a workout mostly just
+    # reflects "you were exercising," not a meaningful per-activity signal the
+    # way body battery's before/after delta is.
+    avg_stress_level = Column(Integer, nullable=True)
+    max_stress_level = Column(Integer, nullable=True)
+
     wellness_synced_at = Column(String, nullable=True)  # dedup marker, mirrors Run.detail_synced_at
 
 

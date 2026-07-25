@@ -675,6 +675,50 @@ def _sync_daily_wellness(client, user_id: str, days: int, progress_cb=None) -> i
                 log.debug(f"garmin wellness sync: get_training_status failed for {date_str}: {e}")
 
             try:
+                # Real shape (confirmed live): a list with one entry for the
+                # requested date, not a bare dict.
+                raw_readiness = client.get_training_readiness(date_str) or []
+                readiness = raw_readiness[0] if raw_readiness else {}
+                if readiness.get("score") is not None:
+                    row.training_readiness_score = round(readiness["score"])
+                if readiness.get("level"):
+                    row.training_readiness_level = readiness["level"]
+                if readiness.get("feedbackShort"):
+                    row.training_readiness_feedback = readiness["feedbackShort"]
+            except Exception as e:
+                if _is_rate_limit_error(e):
+                    raise
+                log.debug(f"garmin wellness sync: get_training_readiness failed for {date_str}: {e}")
+
+            try:
+                # Real shape (confirmed live): a list with one entry for the
+                # requested date, not a bare dict.
+                raw_bb = client.get_body_battery(date_str) or []
+                bb = raw_bb[0] if raw_bb else {}
+                if bb.get("charged") is not None:
+                    row.body_battery_charged = round(bb["charged"])
+                if bb.get("drained") is not None:
+                    row.body_battery_drained = round(bb["drained"])
+                bb_values = bb.get("bodyBatteryValuesArray")
+                if bb_values:
+                    row.body_battery_json = json.dumps(bb_values)
+            except Exception as e:
+                if _is_rate_limit_error(e):
+                    raise
+                log.debug(f"garmin wellness sync: get_body_battery failed for {date_str}: {e}")
+
+            try:
+                raw_stress = client.get_all_day_stress(date_str) or {}
+                if raw_stress.get("avgStressLevel") is not None:
+                    row.avg_stress_level = round(raw_stress["avgStressLevel"])
+                if raw_stress.get("maxStressLevel") is not None:
+                    row.max_stress_level = round(raw_stress["maxStressLevel"])
+            except Exception as e:
+                if _is_rate_limit_error(e):
+                    raise
+                log.debug(f"garmin wellness sync: get_all_day_stress failed for {date_str}: {e}")
+
+            try:
                 raw_sleep = client.get_sleep_data(date_str) or {}
                 sleep_fields = _extract_sleep_fields(raw_sleep)
                 for k, v in sleep_fields.items():

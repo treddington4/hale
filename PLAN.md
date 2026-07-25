@@ -3296,6 +3296,53 @@ computed differently (Garmin's own algorithm vs. this app's hrTSS-based PMC).
       numbers — data collection only for now.
 - [x] Commit.
 
+**24.2 Training Readiness, Body Battery, daily Stress** — user asked for a broader
+survey of what `garminconnect` exposes (136 public methods total). Checked the
+standouts live rather than just listing them:
+- **Training Readiness** (`get_training_readiness`) — Garmin's own composite daily
+  readiness score (0-100) with real sub-factors (sleep/recovery/HRV/stress/ACWR,
+  each already a percent+feedback pair in Garmin's response) — the most direct
+  cross-check yet against this app's own `stats.readiness()`, arguably stronger
+  than the training-load comparison in 24.1.
+- **Body Battery** (`get_body_battery`) — daily charged/drained *and* the full
+  intraday `[[timestamp_ms, value]]` series, stored as JSON (not just the daily
+  summary) specifically so a later feature can derive **per-activity impact**
+  (the "Net Impact" shown on individual Garmin activity pages) from a Run's
+  start/end time against this timeline, without a second API call — explicitly
+  requested ("eventually a per-activity would be nice") but not built yet.
+- **Daily Stress** (`get_all_day_stress`) — clean documented daily avg/max, unlike
+  the undocumented per-activity `avg_stress` FIT field found in Phase 23. No
+  intraday array kept here (workout-time stress mostly just reflects "you were
+  exercising," not a meaningful per-activity signal the way body battery's
+  before/after delta is).
+- [x] Three new independently-wrapped per-day API calls added to
+      `_sync_daily_wellness`, same pattern as every other metric.
+- [x] Verified against real data: readiness 50/MODERATE/LISTEN_TO_YOUR_BODY, body
+      battery 51 charged/59 drained with a real 126-point intraday array, stress
+      21 avg/100 max.
+- **Race predictions (`get_race_predictions`) — blocked, not a code issue**: the
+  account has no Garmin Connect display name set (`get_full_name()`/
+  `get_user_profile()["displayName"]` both `None`), and this endpoint 403s without
+  one. External fix only (set a display name at connect.garmin.com) — not
+  something this app can do on the user's behalf.
+- **Found while investigating "is there a single get-all command?"**: yes —
+  `get_user_summary`/`get_stats_and_body` bundle several metrics in one call, but
+  both need the same missing display name, so unusable right now.
+  **This also means `get_stats()` — used since Phase 4.1 for `resting_hr_bpm` —
+  is just an alias for `get_user_summary()` internally, so it's hit the same
+  wall.** Confirmed via real data: `resting_hr_bpm` populated correctly through
+  2026-07-20, then **silently `None` for every day since 2026-07-21** — a real,
+  pre-existing regression unrelated to anything built this session, only
+  surfaced by this investigation. Same external fix (set a display name)
+  resolves this too; `get_max_metrics` (`vo2max`)/`get_hrv_data`/
+  `get_respiration_data`/`get_training_status`/`get_training_readiness`/
+  `get_body_battery`/`get_all_day_stress` are all confirmed NOT to depend on
+  display name, so they were and remain unaffected.
+- [ ] Neither readiness/body-battery/stress nor the per-activity body-battery
+      idea are wired into the UI or `stats.readiness()` yet — data collection
+      only for now.
+- [x] Commit.
+
 ---
 
 ## Cross-cutting features (slot in any time after the listed dependency)
