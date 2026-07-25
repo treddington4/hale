@@ -249,6 +249,23 @@ def _login(user_id: str):
 
     if _lightweight_session_check(client, token_store):
         log.debug("garmin login: lightweight session check succeeded — skipped garminconnect's forced profile/settings calls")
+        # ...except display_name/full_name are ONLY ever set as a side effect of
+        # those skipped calls (garminconnect._load_profile_and_settings) -- never
+        # populated by the lightweight path. A real, confirmed-live bug this
+        # caused: get_stats()/get_user_summary() and several other endpoints
+        # 403 without a display_name, so resting_hr_bpm silently went to None for
+        # every sync since this lightweight path started being taken, not because
+        # the account itself lacks a display name (it doesn't -- confirmed via a
+        # forced full login). Fetching it once per fresh client (bounded by
+        # GARMIN_CLIENT_CACHE_MAX_AGE_SEC's in-process cache above, so this is at
+        # most one extra pair of calls per cache window, not per sync) closes the
+        # gap without giving up the lightweight path's savings on every other call.
+        if not client.display_name:
+            try:
+                client._load_profile_and_settings()
+                log.debug("garmin login: populated display_name after lightweight session check")
+            except Exception as e:
+                log.debug(f"garmin login: could not populate display_name ({e}) — display-name-dependent calls will fail this session")
     else:
         try:
             client.login(tokenstore=token_store)

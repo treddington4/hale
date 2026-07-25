@@ -3320,24 +3320,38 @@ standouts live rather than just listing them:
 - [x] Verified against real data: readiness 50/MODERATE/LISTEN_TO_YOUR_BODY, body
       battery 51 charged/59 drained with a real 126-point intraday array, stress
       21 avg/100 max.
-- **Race predictions (`get_race_predictions`) — blocked, not a code issue**: the
-  account has no Garmin Connect display name set (`get_full_name()`/
-  `get_user_profile()["displayName"]` both `None`), and this endpoint 403s without
-  one. External fix only (set a display name at connect.garmin.com) — not
-  something this app can do on the user's behalf.
-- **Found while investigating "is there a single get-all command?"**: yes —
-  `get_user_summary`/`get_stats_and_body` bundle several metrics in one call, but
-  both need the same missing display name, so unusable right now.
-  **This also means `get_stats()` — used since Phase 4.1 for `resting_hr_bpm` —
-  is just an alias for `get_user_summary()` internally, so it's hit the same
-  wall.** Confirmed via real data: `resting_hr_bpm` populated correctly through
-  2026-07-20, then **silently `None` for every day since 2026-07-21** — a real,
-  pre-existing regression unrelated to anything built this session, only
-  surfaced by this investigation. Same external fix (set a display name)
-  resolves this too; `get_max_metrics` (`vo2max`)/`get_hrv_data`/
-  `get_respiration_data`/`get_training_status`/`get_training_readiness`/
-  `get_body_battery`/`get_all_day_stress` are all confirmed NOT to depend on
-  display name, so they were and remain unaffected.
+- **Race predictions (`get_race_predictions`) initially looked account-blocked —
+  it wasn't. Real root cause found and fixed**: `client.display_name` was empty,
+  and that endpoint (plus `get_user_summary`/`get_stats_and_body`/`get_stats`)
+  403s without one — but the account has a perfectly normal display name; our
+  own `_lightweight_session_check` optimization (Phase 1.x-era, built to skip
+  garminconnect's forced profile/settings calls on every sync) just never
+  populates `display_name` on the client object at all, since that only happens
+  as a side effect of the very calls it's designed to skip. Confirmed by forcing
+  a real full login: display name populated immediately. **Also explains why
+  `get_stats()` — used since Phase 4.1 for `resting_hr_bpm` (`get_stats` is just
+  an alias for `get_user_summary` internally) — has had `resting_hr_bpm` silently
+  `None` for every day since 2026-07-21**, a real regression that predates this
+  session, only surfaced by asking "is there a single get-all command?".
+  **Fix**: after a successful lightweight session check, if `display_name` is
+  still empty, call garminconnect's private `_load_profile_and_settings()` once
+  to populate it — bounded to at most one extra pair of API calls per
+  `GARMIN_CLIENT_CACHE_MAX_AGE_SEC` (30min) in-process client-cache window, not
+  once per sync, so the lightweight path's savings on every other call are kept.
+  Verified live: `display_name` now populates correctly through the normal
+  cached-session path, `resting_hr_bpm` recovered (42 for 2026-07-24), and
+  `get_race_predictions()` returns real values (5K 22:09, 10K 47:15,
+  half 1:47:31, marathon 4:00:01) — no Garmin-side account change was needed
+  after all. `get_max_metrics` (`vo2max`)/`get_hrv_data`/`get_respiration_data`/
+  `get_training_status`/`get_training_readiness`/`get_body_battery`/
+  `get_all_day_stress` were all already confirmed independent of display_name,
+  so unaffected either way.
+- [ ] Race predictions (`time5K`/`time10K`/`timeHalfMarathon`/`timeMarathon`,
+      seconds) not yet stored anywhere — HALE has no existing prediction logic
+      of its own to compare against (checked), so for now this is Garmin's
+      number alone; if HALE ever builds its own predictor, these are a
+      ready-made validation baseline rather than something to build toward
+      immediately.
 - [ ] Neither readiness/body-battery/stress nor the per-activity body-battery
       idea are wired into the UI or `stats.readiness()` yet — data collection
       only for now.
