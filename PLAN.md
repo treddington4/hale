@@ -1666,6 +1666,11 @@ directly on the Workouts tab with a way to start a new one from there.
 - [ ] Needs a real design pass at implementation time to confirm that framing and
       work out the actual UI (calendar view? phase timeline? per-week cards?) — not
       scoped further here.
+- **Superseded/expanded by Phase 21** (multi-activity weekly training plan
+      builder) — the user's later ask for available-days-per-week, secondary
+      activities layered onto a primary goal, and sleep-schedule awareness folds
+      into and grows this item rather than competing with it. Do the design pass
+      once, covering both.
 
 ### 13.4 Queryable chat memory (cross-session context continuity)
 Confirmed with the user: explicitly **not** a blanket "re-seed everything on session
@@ -2875,6 +2880,194 @@ shouldnt rely on it").
       reconfirmed real data (144 runs, 5 goals, Strava connected, dashboard
       cache serving real mileage numbers) untouched, plus a Home tab
       screenshot rendering exactly as before.
+
+---
+
+## Phase 17 — Connections/Settings redesign (foundational, do first)
+
+User feedback after Hevy's first live use (see 6.5.1): the current Settings tab
+lists Strava/Garmin/Hevy as separate ad-hoc sections, each with its own manual
+"Sync Now"/"Backlog Sync" buttons, and a Garmin-specific file-import button sitting
+at the same visual level as everything else. User wants one unified Connections
+view instead — this phase is the prerequisite for Phase 19's weight tracking (needs
+its own connection-style card) and should ship before the smaller UI additions in
+18/19 so they land inside the new shape rather than the old one.
+
+- [ ] 17.1 **Unified Connections grid**: one row/grid of provider icon tiles
+      (Strava, Garmin, Hevy, later Withings-via-Garmin doesn't need its own tile —
+      see 19). Connected → icon full-color; not connected → greyed out.
+- [ ] 17.2 **Click-to-configure popover**: clicking any tile opens a popup.
+      Disconnected → the existing per-provider connect form (Strava OAuth button,
+      Garmin username/password, Hevy API key) moves here from its current standalone
+      section. Connected → shows connection details (username/masked key, last-synced
+      info) and a Disconnect action, reusing the existing `DELETE /api/connections/
+      {provider}` endpoint.
+- [ ] 17.3 **Garmin import relocated**: the manual Garmin-export-ZIP upload button
+      moves from its current standalone spot to inside the Garmin tile's popover
+      (under the connection details), since it's a Garmin-specific one-time backfill
+      tool, not a general action.
+- [ ] 17.4 **Auto-scheduled background sync on connect**: today `_auto_sync` already
+      runs every credentialed auto-sync-eligible integration on the existing
+      `SYNC_INTERVAL_HOURS` schedule (registry.py) — confirm/adjust so a *newly
+      added* connection is picked up on the very next scheduler tick without
+      requiring a manual "Sync Now" first (likely already true given `_auto_sync`
+      iterates `_users_with_credential` fresh each tick; verify, don't assume).
+      Manual "Sync Now"/backlog buttons stay available inside each popover for
+      on-demand use — this is additive, not a replacement.
+- [ ] 17.5 **Single "Sync All" button**: one button outside the grid that fires
+      `manual_sync` for every connected, `auto_sync_eligible` integration at once
+      (Garmin's manual-only nature means it's included here as an explicit action
+      even though it's not on the auto schedule).
+- [ ] 17.6 Data-model wording generalization: continue the "activities" language
+      started in 6.5.1 anywhere still user-visible as "runs" in sync-related copy.
+- [ ] Verify: throwaway container first (standard discipline) — screenshot the new
+      Connections UI in both connected/disconnected states for each provider,
+      confirm popover open/close, confirm Garmin import still works from its new
+      location, confirm auto-sync picks up a freshly-added credential.
+- [ ] Commit per sub-task.
+
+---
+
+## Phase 18 — Gear as top-level nav + activity-type association
+
+Currently `Gear`/`GearSection`/`GearFormDialog` live only inside Settings, plus a
+read-only `GearWearCard` on Home. User wants Gear promoted to a first-class nav
+item (`Shell.tsx`'s `NAV_ITEMS`), not buried in Settings.
+
+- [ ] 18.1 New `web/src/pages/GearPage.tsx` + nav entry (icon: reuse whatever
+      `GearWearCard`/`GearSection` already use). Move `GearSection`'s CRUD UI here;
+      Settings keeps nothing gear-related except perhaps a link.
+- [ ] 18.2 **Activity-type association**: `Gear.parent_gear_id` already exists for
+      bike-component nesting (Phase 6.3) but there's no explicit
+      gear-to-activity-type mapping today beyond the existing `_gear_kind_for_activity`
+      heuristic (`stats.py`) that auto-assigns by inferring shoe-vs-bike from
+      `activity_type`. Add an explicit optional field (e.g. `Gear.activity_types_json`
+      or reuse the existing kind field) so a piece of gear can be scoped to specific
+      activity types (e.g. a trail-running shoe only offered for Trail Run, not Road
+      Run) rather than relying purely on the shoe/bike heuristic split.
+- [ ] Verify: throwaway container, screenshot the new Gear tab, confirm existing
+      Home `GearWearCard` unaffected, confirm gear CRUD still works from its new home.
+- [ ] Commit.
+
+---
+
+## Phase 19 — Weight tracking (Garmin body-composition sync)
+
+Confirmed with the user: they weigh in on a Withings scale and manually sync it to
+Garmin Connect daily — so real body-composition history already exists in their
+Garmin account (confirmed live: `client.get_daily_weigh_ins(date)` already returns
+real weight/BMI/body-fat/water/muscle-mass data with `sourceType: "INDEX_SCALE"`).
+**No separate Withings OAuth integration is needed for this** — Garmin is already
+the aggregation point via the user's own existing manual-sync habit. Revisit direct
+Withings integration only if that manual-sync habit ever stops.
+- [ ] 19.1 New sync path (`garmin_sync.py` or a small new module) pulling
+      `get_daily_weigh_ins`/`get_body_composition` incrementally (same "only fetch
+      what's new" discipline as everything else) into a new small table (e.g.
+      `BodyMetric(user_id, date, weight_lb, body_fat_pct, body_water_pct,
+      muscle_mass_lb, source)`) rather than overloading `Run`.
+      `User.weight_lb` (already exists) becomes "current/most recent," backfilled
+      from this new table's latest row.
+- [ ] 19.2 Small trend surface — a Home widget or Settings/Gear-adjacent card
+      showing recent weight trend (sparkline), matching this app's existing
+      "trend card" visual pattern (fitness-trend card, PMC chart) rather than
+      inventing new chart chrome.
+- [ ] Verify: throwaway container against a copy of real production DB + real
+      Garmin credential, confirm real historical weigh-ins parse correctly end to
+      end; confirm `User.weight_lb` still feeds existing consumers (any BMR/TSS
+      calc that already reads it) without a schema break.
+- [ ] Commit.
+
+---
+
+## Phase 20 — Max HR: pull from Garmin, fall back to age-based default
+
+`User.max_hr` already exists and is user-editable; `UserTrainingConfig.zones_json`
+already documents "null = derive from max_hr (208 - 0.7*age default)" as a fallback.
+Confirmed with the user: prefer Garmin's own recorded max HR when a connection
+exists (it can change occasionally, e.g. after a real max-effort test) over a pure
+age formula, but the age-based Tanaka default stays as the fallback when there's no
+Garmin connection or no recorded value.
+- [ ] 20.1 Research pass (start of implementation, not now): confirm exactly which
+      garminconnect call surfaces a real recorded max HR (candidates seen in the
+      installed library: `get_max_metrics`, `get_user_profile`,
+      `get_userprofile_settings`, `get_lactate_threshold` — `get_max_metrics` returned
+      empty for a spot-checked recent date during this planning pass, so don't assume
+      it's the right one without checking a few more dates/users first).
+- [ ] 20.2 On sync, if a real Garmin max HR is found and differs from
+      `User.max_hr`, update it (still user-editable/overridable in Settings
+      afterward — same "sync sets a default, user can correct" pattern as
+      `_guess_strength_type` elsewhere). If no Garmin value is ever found, fall back
+      to computing `208 - 0.7 * age` from `User.date_of_birth` (already exists) only
+      when `User.max_hr` has never been manually set.
+- [ ] Verify: throwaway container, confirm real Garmin sync populates a real max HR
+      value if one exists on the account; confirm the age-based fallback fires
+      correctly for a synthetic no-Garmin-connection user.
+- [ ] Commit.
+
+---
+
+## Phase 21 — Multi-activity weekly training plan builder (expands 13.3)
+
+The already-open Phase 13.3 ("goal-tied multi-week training plan view") gets
+folded into and expanded by this bigger ask rather than being a separate,
+competing effort. User wants one real planning surface that combines: available
+training days/week, a primary focus (e.g. marathon) with room for secondary
+activities layered in (e.g. an occasional bike ride even while the primary plan is
+run-focused), explicit long-run-day placement, and sleep-schedule awareness — not
+just the existing single-activity race-phase mileage budget (Phase 4.3's
+`WeeklyPlan`/generator).
+- [ ] 21.1 Design pass (real scoping needed before backend work starts, per 13.3's
+      own open note): decide the actual data shape — likely a `TrainingPlan`
+      concept above the existing per-week `WeeklyPlan` rows, holding: target goal(s),
+      available days-of-week (bitmask or list), long-run day, secondary-activity
+      slots, and a reference to sleep-schedule constraints (from existing wellness/
+      sleep data already synced from Garmin).
+- [ ] 21.2 Generator changes: `_generate_endurance`/`_generate_strength` (already
+      generalized once for Phase 14's Ride/Strength quick-generate) need to respect
+      the new plan's day-availability + secondary-activity slots when placing
+      sessions, not just the existing phase/budget ceiling logic.
+- [ ] 21.3 Sleep-schedule awareness: use existing synced sleep data (bed/wake times
+      already in wellness rows) to avoid scheduling e.g. an early long run against a
+      documented late-sleep pattern — exact mechanism (hard constraint vs. soft
+      warning) to be decided in the 21.1 design pass, not assumed here.
+- [ ] 21.4 Frontend: the actual UI (calendar view? phase timeline? per-week cards?)
+      — explicitly still undecided per 13.3's own note; resolve in the 21.1 design
+      pass together with the new multi-activity/sleep dimensions, not as an
+      afterthought once the backend shape is locked.
+- [ ] Verify + commit per sub-task, standard discipline.
+
+---
+
+## Phase 22 — Sleep-temperature analysis + Chilipad 2.0 control (device arrives ~Aug 5, 2026)
+
+User previously had an Orion smart-bed controller (no longer owned) and shared
+its historical temperature-by-sleep-phase graph (Bedtime 71°F/Night 66°F/Dawn
+84°F/Wake 59°F) as a reference point. **They have a Chilipad 2.0 on order,
+expected to ship 2026-08-05** — so unlike the original ask, this isn't purely
+retrospective analysis; real live control is coming, just not yet.
+- [ ] 22.1 **Analysis piece (buildable now, no device needed)**: correlate existing
+      synced sleep-stage data + HRV (already ingested from Garmin wellness sync)
+      against historical nights to produce a recommended temperature-by-phase
+      profile (Bedtime/Night/Dawn/Wake-equivalent), presented as an insight
+      card/report — real numbers derived from the user's own data, not invented
+      confidence, matching this app's existing "never fabricate a score" discipline
+      (`stats.goal_progress()`, dashboard cards). Ship this independent of the
+      device arriving.
+- [ ] 22.2 **Device control (blocked until the Chilipad physically arrives and its
+      control interface is confirmed)**: ChiliSleep/SleepMe's Chilipad line has no
+      confirmed-stable public API at planning time — needs real research once the
+      device is in hand (cloud API vs. local network control vs. a reverse-engineered
+      client, similar in spirit to how `garminconnect` itself is an unofficial
+      wrapper). Do not build against assumed endpoints; this sub-phase starts only
+      after 22.1 ships and the device is available to test against directly.
+- [ ] 22.3 Toggle + tuning loop: once 22.2's control path is confirmed, add the
+      enable/disable toggle + "needs a couple of nights to tune" iteration the user
+      originally described, applying 22.1's recommended profile as the initial
+      setting and adjusting from subsequent nights' real sleep/HRV response.
+- [ ] Verify + commit per sub-task. 22.1 can proceed immediately; 22.2/22.3 are
+      explicitly gated on real device availability (~Aug 5, 2026) and a confirmed
+      control API — flag back to the user once the device has arrived rather than
+      guessing at integration specifics now.
 
 ---
 
