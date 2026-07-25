@@ -3230,6 +3230,74 @@ Hevy's real per-set durations).
 
 ---
 
+## Phase 24 — Daily respiration rate tracking (readiness signal) — done
+
+While investigating Garmin's FIT session-message fields for Phase 23, found
+`avg_respiration_rate`/`max`/`min` (real, officially-documented FIT fields, unlike
+Recovery HR/Sweat Loss/Body Battery which are undocumented/private) and Garmin
+Connect's own post-workout RPE entry (`workout_feel`/`workout_rpe`). Considered both
+as new readiness signals; user confirmed: skip RPE (not something they fill in),
+respiration rate is worth adding.
+
+**Per-activity FIT respiration vs. daily wellness respiration**: per-activity
+values are confounded by workout intensity itself (average respiration during a
+hard interval session isn't comparable to an easy day), so not a clean baseline
+signal on their own. Checked whether garminconnect exposes a proper daily
+baseline instead — it does: `get_respiration_data(date)`, confirmed live, returns
+`avgWakingRespirationValue`/`avgSleepRespirationValue`/`lowestRespirationValue`/
+`highestRespirationValue` for a calendar date, the same "resting X trending up
+= possible illness/fatigue" pattern already used for `resting_hr_bpm`. This is
+the better and cheaper source: one wellness API call per day (already fits the
+existing `_sync_daily_wellness` per-metric-per-day pattern), no FIT file download
+needed at all — unlike per-activity FIT parsing, which would mean either adding a
+new FIT download for every strength activity (Garmin FIT download is skipped
+there today specifically to avoid the cost) or accepting a confounded metric.
+- [x] `DailySteps` gets four new nullable columns: `avg_waking_respiration_rate`,
+      `avg_sleep_respiration_rate`, `lowest_respiration_rate`,
+      `highest_respiration_rate` (auto-migrated, same as every other column here).
+- [x] `garmin_sync._sync_daily_wellness` gets a fifth independently-wrapped
+      per-day API call (`get_respiration_data`), following the exact same
+      one-metric-one-call, degrade-independently-on-failure pattern as
+      resting HR/VO2max/HRV/sleep — a genuine rate-limit error still propagates
+      up unchanged for the caller's existing cooldown handling.
+- [x] Verified against real data: forced a re-sync of a recent day, confirmed
+      real values populated correctly (waking 12.0, sleep 13.0, lowest 4.0,
+      highest 23.0 breaths/min for the test date).
+- [ ] Not yet wired into `stats.readiness()`'s actual flag logic — data
+      collection only for now; a real "elevated resting respiration" flag would
+      need a trend baseline (like existing flags) worked out separately.
+
+**24.1 Garmin's own training load (user follow-up: "probably so is training loads,
+even if undocumented")**. While checking for a training-load equivalent of the
+respiration endpoint, found `get_training_status(date)` — real, structurally clean
+JSON (not raw FIT byte-guessing, so meaningfully lower risk than the undocumented
+FIT session fields elsewhere in this codebase, e.g. Recovery HR): a device-keyed
+`mostRecentTrainingStatus.latestTrainingStatusData` map, each device carrying
+`acuteTrainingLoadDTO` (`dailyTrainingLoadAcute`/`dailyTrainingLoadChronic`/
+`dailyAcuteChronicWorkloadRatio`/`acwrStatus`) and a plain-language
+`trainingStatusFeedbackPhrase` (e.g. `"MAINTAINING_2"`). This is Garmin's own
+acute/chronic training-load and ACWR concept — a genuine **cross-check against
+this app's own independently-computed CTL/ATL/TSB** (Phase 6.2's PMC pipeline),
+not a replacement for it; the two are expected to diverge somewhat since they're
+computed differently (Garmin's own algorithm vs. this app's hrTSS-based PMC).
+- [x] `DailySteps` gets five more nullable columns: `garmin_training_load_acute`,
+      `garmin_training_load_chronic`, `garmin_acwr`, `garmin_acwr_status`,
+      `garmin_training_status_phrase`.
+- [x] `_extract_training_status()` picks the `primaryTrainingDevice`-flagged
+      device (falls back to the only device present if none is flagged, since a
+      single-device account may not always set that flag) — degrades to an
+      empty dict, never raises, matching `_extract_hrv`/`_extract_vo2max`'s own
+      quiet-degradation discipline.
+- [x] `_sync_daily_wellness` gets a sixth independently-wrapped per-day API call
+      (`get_training_status`) — same pattern as every other metric here.
+- [x] Verified against real data: acute 632.0, chronic 581.0, ACWR 1.0 (OPTIMAL),
+      status "MAINTAINING_2" — matches the raw API response exactly.
+- [ ] Not yet surfaced anywhere in the UI or compared against the app's own PMC
+      numbers — data collection only for now.
+- [x] Commit.
+
+---
+
 ## Cross-cutting features (slot in any time after the listed dependency)
 
 - [ ] **Daily AI insight card** (after 0.3): Sonnet one-shot (separate short-lived SDK

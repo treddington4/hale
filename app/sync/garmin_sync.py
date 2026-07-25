@@ -472,6 +472,32 @@ def _extract_hrv(hrv_data) -> tuple:
     return avg_ms, status
 
 
+def _extract_training_status(data) -> dict:
+    """garmin_sync.get_training_status()'s real shape (confirmed live): device-keyed
+    JSON under mostRecentTrainingStatus.latestTrainingStatusData, each device carrying
+    acuteTrainingLoadDTO plus a plain-language trainingStatusFeedbackPhrase. Picks the
+    device flagged primaryTrainingDevice; falls back to the first (only) device if none
+    is flagged, since a single-device account may not always set that flag. Returns an
+    empty dict (never raises) if the shape doesn't match — same degrade-quietly
+    discipline as _extract_hrv/_extract_vo2max."""
+    try:
+        devices = data.get("mostRecentTrainingStatus", {}).get("latestTrainingStatusData", {})
+        if not devices:
+            return {}
+        device = next((d for d in devices.values() if d.get("primaryTrainingDevice")), None)
+        device = device or next(iter(devices.values()))
+        acute = device.get("acuteTrainingLoadDTO") or {}
+        return {
+            "acute": acute.get("dailyTrainingLoadAcute"),
+            "chronic": acute.get("dailyTrainingLoadChronic"),
+            "acwr": acute.get("dailyAcuteChronicWorkloadRatio"),
+            "acwr_status": acute.get("acwrStatus"),
+            "status_phrase": device.get("trainingStatusFeedbackPhrase"),
+        }
+    except (AttributeError, TypeError):
+        return {}
+
+
 def _first_not_none(*values):
     """Like `a or b or c`, but doesn't treat a legitimate 0 as missing — real fields
     here (awake seconds especially) can genuinely be 0 for a solid night's sleep, and
@@ -527,21 +553,21 @@ def _extract_sleep_stages(raw_sleep: dict) -> list:
 
 
 def _sync_daily_wellness(client, user_id: str, days: int, progress_cb=None) -> int:
-    """Resting HR / VO2max / sleep / HRV (added Phase 4.1, for stats.readiness()), one
-    row per day in DailySteps — deliberately scoped to just these 4 metrics (not the
-    full 9-field wellness set from the original plan) since each additional metric is
-    another live API call per day, and this account's rate-limit sensitivity argued
-    for keeping that cost down. Dedups via
+    """Resting HR / VO2max / sleep / HRV / respiration (respiration added Phase 24,
+    for stats.readiness()), one row per day in DailySteps — deliberately scoped to
+    just these metrics (not the full 9-field wellness set from the original plan)
+    since each additional metric is another live API call per day, and this
+    account's rate-limit sensitivity argued for keeping that cost down. Dedups via
     day_needs_wellness_sync (same principle as run_needs_detail_sync) for settled days;
     the trailing GARMIN_WELLNESS_VOLATILE_DAYS window (today's/yesterday's data can
     still change) is re-checked on a GARMIN_WELLNESS_RECHECK_MIN_SEC throttle rather
     than unconditionally every call — two syncs a minute apart shouldn't both pay the
-    full 3-days x 3-metrics cost for data that couldn't plausibly have changed in
-    between. Three separate API calls per day (get_stats/get_max_metrics/
-    get_sleep_data), each independently wrapped so one metric's absence/failure never
-    blocks the others — same discipline as _fetch_running_dynamics. A genuine
-    rate-limit hit propagates up unchanged so the caller's existing
-    GarminMidSyncRateLimitError/cooldown handling applies uniformly."""
+    full multi-day x multi-metric cost for data that couldn't plausibly have changed
+    in between. Each metric is its own independently-wrapped API call (get_stats/
+    get_max_metrics/get_hrv_data/get_respiration_data/get_sleep_data) so one metric's
+    absence/failure never blocks the others — same discipline as
+    _fetch_running_dynamics. A genuine rate-limit hit propagates up unchanged so the
+    caller's existing GarminMidSyncRateLimitError/cooldown handling applies uniformly."""
     end = local_today(user_id)
     volatile_start = end - timedelta(days=GARMIN_WELLNESS_VOLATILE_DAYS - 1)
     start = end - timedelta(days=days - 1)
@@ -610,6 +636,43 @@ def _sync_daily_wellness(client, user_id: str, days: int, progress_cb=None) -> i
                 if _is_rate_limit_error(e):
                     raise
                 log.debug(f"garmin wellness sync: get_hrv_data failed for {date_str}: {e}")
+
+            try:
+                raw_resp = client.get_respiration_data(date_str) or {}
+                waking = raw_resp.get("avgWakingRespirationValue")
+                sleep_resp = raw_resp.get("avgSleepRespirationValue")
+                lowest = raw_resp.get("lowestRespirationValue")
+                highest = raw_resp.get("highestRespirationValue")
+                if waking is not None:
+                    row.avg_waking_respiration_rate = round(waking, 1)
+                if sleep_resp is not None:
+                    row.avg_sleep_respiration_rate = round(sleep_resp, 1)
+                if lowest is not None:
+                    row.lowest_respiration_rate = round(lowest, 1)
+                if highest is not None:
+                    row.highest_respiration_rate = round(highest, 1)
+            except Exception as e:
+                if _is_rate_limit_error(e):
+                    raise
+                log.debug(f"garmin wellness sync: get_respiration_data failed for {date_str}: {e}")
+
+            try:
+                raw_status = client.get_training_status(date_str) or {}
+                ts = _extract_training_status(raw_status)
+                if ts.get("acute") is not None:
+                    row.garmin_training_load_acute = round(ts["acute"], 1)
+                if ts.get("chronic") is not None:
+                    row.garmin_training_load_chronic = round(ts["chronic"], 1)
+                if ts.get("acwr") is not None:
+                    row.garmin_acwr = round(ts["acwr"], 2)
+                if ts.get("acwr_status"):
+                    row.garmin_acwr_status = ts["acwr_status"]
+                if ts.get("status_phrase"):
+                    row.garmin_training_status_phrase = ts["status_phrase"]
+            except Exception as e:
+                if _is_rate_limit_error(e):
+                    raise
+                log.debug(f"garmin wellness sync: get_training_status failed for {date_str}: {e}")
 
             try:
                 raw_sleep = client.get_sleep_data(date_str) or {}

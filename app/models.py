@@ -150,6 +150,32 @@ class DailySteps(Base):
     # instead of just daily totals — see garmin_sync._extract_sleep_stages(). Confirmed
     # against real data: Garmin's sleepLevels activityLevel is 0=deep/1=light/2=rem/3=awake.
     sleep_stages_json = Column(Text, default="[]")
+
+    # Phase 24 — daily respiration (get_respiration_data()), waking/sleep averages
+    # rather than noisy per-workout FIT session values (which are heavily
+    # confounded by workout intensity itself) — an elevated *resting* baseline is
+    # the actual illness/fatigue signal, same "resting X trending up" pattern as
+    # resting_hr_bpm above. Shape confirmed directly against the live API (unlike
+    # get_hrv_data/get_max_metrics above, no defensive multi-path guessing needed).
+    avg_waking_respiration_rate = Column(Float, nullable=True)
+    avg_sleep_respiration_rate = Column(Float, nullable=True)
+    lowest_respiration_rate = Column(Float, nullable=True)
+    highest_respiration_rate = Column(Float, nullable=True)
+
+    # Phase 24 — Garmin's OWN acute/chronic training load + ACWR (get_training_status()),
+    # a genuine cross-check against this app's own independently-computed CTL/ATL/TSB
+    # (Phase 6.2's PMC pipeline) rather than a replacement for it. Undocumented in the
+    # sense that garminconnect has no typed method/field names for this specific data
+    # (plain nested JSON keyed by device id under mostRecentTrainingStatus), but it's a
+    # normal REST JSON response, not raw FIT byte-guessing — much lower risk than the
+    # undocumented FIT session fields (Recovery HR/Sweat Loss/Body Battery) elsewhere in
+    # this codebase, since there's no encoding/scale ambiguity to get wrong.
+    garmin_training_load_acute = Column(Float, nullable=True)
+    garmin_training_load_chronic = Column(Float, nullable=True)
+    garmin_acwr = Column(Float, nullable=True)  # dailyAcuteChronicWorkloadRatio
+    garmin_acwr_status = Column(String, nullable=True)  # Garmin's own label verbatim, e.g. "OPTIMAL"
+    garmin_training_status_phrase = Column(String, nullable=True)  # e.g. "MAINTAINING_2"
+
     wellness_synced_at = Column(String, nullable=True)  # dedup marker, mirrors Run.detail_synced_at
 
 
