@@ -13,45 +13,62 @@ Why not just PUT Hevy's sets onto the existing Garmin activity? Confirmed live
 (hevy2garmin issue #159): Garmin's `exerciseSets` endpoint returns success (204)
 on a *watch-recorded* activity but silently drops the exercise names, rendering
 every exercise as "Unknown" in the Garmin Connect app despite the write
-succeeding. Named exercises only render correctly on activities Garmin considers
-"uploaded" (FIT manufacturer=DEVELOPMENT), never watch-recorded ones. So instead:
+succeeding. That limitation is specific to that live REST endpoint, though --
+confirmed live, exercise names render correctly on a fresh FIT *upload* even
+with the original watch's own real manufacturer left untouched (no need to
+spoof FileId.manufacturer=DEVELOPMENT the way hevy2garmin's own from-scratch
+uploads do). So instead:
 
   - Match found (a Garmin strength_training Run already overlaps this Hevy
     workout in time -- checked via our own already-synced Run rows, no extra
-    Garmin API call needed to find a candidate): "replace, but human-gated."
-    preview_push() uploads a brand-new, correctly-named duplicate activity; the
-    original watch-recorded one is untouched at this step. Only confirm_push()
-    (an explicit second user action, after they've visually checked the
-    duplicate in Garmin Connect themselves) deletes the original. discard_preview()
-    removes the duplicate instead, leaving the original untouched -- either way
-    nothing real is ever lost without the user's explicit say-so.
+    Garmin API call needed to find a candidate): the ORIGINAL watch activity's
+    real FIT bytes are backed up to disk, then Hevy's exercise_title/set
+    records are spliced in (see fit_binary.py) -- every other field survives,
+    including ones neither fitparse nor fit_tool have names for (Training
+    Effect, Respiration Rate, Recovery HR, Est. Sweat Loss all confirmed
+    correct in the Garmin Connect app after upload, not just byte-identical
+    locally). Garmin's own duplicate-detection rejects uploading this as a
+    second activity while the original still exists (confirmed live: 409
+    "Duplicate Activity") -- so replace_with_enriched() deletes the original
+    FIRST, then uploads the spliced file; if the upload fails for any reason
+    after the delete, it automatically re-uploads the backup so the workout is
+    never left with nothing on Garmin. revert_to_backup() is a manual undo if
+    the user doesn't like the result after seeing it live: deletes the new
+    upload and restores the backup.
   - No match (nothing recorded on Garmin at all): nothing to replace or lose,
-    so create_new() just uploads it directly, no confirm step -- HR is not
-    fused in (there's no watch recording to pull it from), an accepted
-    tradeoff since the exercise/weight/rep data is the actual point.
+    so create_new() just uploads a fresh FIT built purely from Hevy data (no
+    original to splice into) -- no HR fused in, an accepted tradeoff since the
+    exercise/weight/rep data is the actual point. This from-scratch path still
+    uses hevy2garmin's own manufacturer=DEVELOPMENT convention since there's no
+    real original to preserve identity from anyway.
 
-When a match exists, the original watch activity's real per-second HR stream is
-pulled from its downloaded FIT file (garmin_sync._download_fit_bytes/
-_parse_fit_records, the same raw-device-recording path used elsewhere in this
-codebase for route data) and fused into the duplicate's generated FIT, so Avg/Max
-HR carry over. Garmin's own derived physiological metrics on the original (Training
-Effect, Exercise Load, Respiration Rate, Est. Sweat Loss, Recovery HR) come from
-proprietary on-device sensor processing (respiration/stress sensors, Garmin's
-Firstbeat algorithm) that a synthetic re-uploaded FIT cannot reproduce even with a
-real HR stream embedded -- those are expected to stay blank on the duplicate; only
-HR-derived fields (Avg/Max HR, and whatever calorie estimate hevy2garmin computes
-from the HR stream) carry over.
+Why splice raw bytes instead of parsing the original into objects and rebuilding
+it via fit_tool's FitFileBuilder? Tried that first -- it corrupts real watch
+recordings. A real Garmin FIT contains thousands of vendor-specific messages
+(GenericMessage/TimestampCorrelationMessage) that fit_tool's bundled profile
+doesn't fully understand; feeding all of them back through
+FitFileBuilder(auto_define=True) produced a file that "wrote successfully" but
+was unparseable afterward ("invalid local message type"). The byte-splice
+approach never asks fit_tool to re-encode any of the original's real content --
+it only builds the new (simple, from-scratch, already-proven-reliable)
+exercise_title/set records via hevy2garmin's own `fit.generate_fit()`, then
+inserts their raw bytes into the untouched original and fixes up the two
+values that describe the whole file (the header's data-size field and the
+trailing CRC) -- see fit_binary.py's own docstring for why this only requires
+understanding record *boundaries*, not full field semantics.
 """
-import io
 import os
+import struct
 import tempfile
 from datetime import datetime, timedelta
 
+from fit_tool.utils.crc import crc16
 from hevy2garmin import fit as h2g_fit
 from hevy2garmin import garmin as h2g_garmin
 
-from ..models import SessionLocal, Run, owned_by
+from ..models import SessionLocal, Run, owned_by, DB_PATH
 from . import garmin_sync, hevy_sync
+from . import fit_binary
 
 MATCH_WINDOW_MIN = 30
 
@@ -110,41 +127,100 @@ def _fetch_raw_hevy_workout(user_id: str, hevy_run_id: str) -> dict:
     return hevy_sync._request(api_key, f"/workouts/{_hevy_workout_id(hevy_run_id)}")
 
 
-def _fetch_original_hr_samples(client, activity_id: int) -> list | None:
-    """Real per-second HR from the original watch-recorded activity's own FIT file
-    (not a re-derived summary), so the duplicate upload can carry the same Avg/Max
-    HR instead of showing no heart-rate data at all. Reuses garmin_sync's existing
-    FIT-download/record-parse path (already used there for route data) rather than
-    a second implementation. Returns None (not an error) if the original has no HR
-    records -- e.g. no HR strap/watch-on-wrist that session -- so callers just fall
-    back to no HR, same as the no-match path."""
-    fit_bytes = garmin_sync._download_fit_bytes(client, activity_id)
-    if not fit_bytes:
-        return None
-    try:
-        import fitparse
-        fit = fitparse.FitFile(io.BytesIO(fit_bytes))
-        points = garmin_sync._parse_fit_records(fit)
-    except Exception:
-        return None
-    hr_points = [p for p in points if p.get("hr") is not None and p.get("t") is not None]
-    if not hr_points:
-        return None
-    t0 = hr_points[0]["t"]
-    return [{"time": (p["t"] - t0).total_seconds(), "hr": p["hr"]} for p in hr_points]
+def _splice_exercise_data(original_fit_bytes: bytes, workout: dict, tmp_dir: str) -> bytes:
+    """Returns a new FIT byte string: the original watch recording, untouched
+    except for (a) FileId.serial_number patched to a placeholder -- needed to
+    dodge Garmin's duplicate-activity rejection, confirmed live: manufacturer
+    does NOT need to change (exercise names render correctly on upload even
+    with the original watch's real manufacturer intact -- the name-dropping
+    behavior is specific to the live exerciseSets PUT endpoint, not FIT
+    uploads) -- and (b) Hevy's exercise_title/set records inserted right after
+    FileId, replacing the original's own (unreliable) exercise data rather
+    than sitting alongside it. Every other byte, including fields neither
+    fitparse nor fit_tool have names for (Recovery HR, Est. Sweat Loss, Body
+    Battery, etc.), survives unchanged and renders correctly in the Garmin
+    Connect app -- confirmed live, not just byte-identical locally -- because
+    those bytes are never parsed into an object and re-encoded, just carried
+    through verbatim.
+
+    See fit_binary.py's own module docstring for why this operates at the raw
+    byte level instead of through fit_tool's object model."""
+    hevy_fit_path = os.path.join(tmp_dir, "hevy_isolated.fit")
+    h2g_fit.generate_fit(workout, None, hevy_fit_path)
+    with open(hevy_fit_path, "rb") as f:
+        hevy_bytes = f.read()
+
+    orig_hdr = fit_binary.parse_header(original_fit_bytes)
+    orig_records = fit_binary.walk_records(original_fit_bytes, orig_hdr["data_start"], orig_hdr["data_end"])
+    hevy_hdr = fit_binary.parse_header(hevy_bytes)
+    hevy_records = fit_binary.walk_records(hevy_bytes, hevy_hdr["data_start"], hevy_hdr["data_end"])
+
+    ex_span = fit_binary.group_byte_span(hevy_records, fit_binary.EXERCISE_TITLE_MESG_NUM)
+    set_span = fit_binary.group_byte_span(hevy_records, fit_binary.SET_MESG_NUM)
+    if not ex_span or not set_span:
+        raise RuntimeError("hevy2garmin's generated FIT had no exercise_title/set records to splice")
+    extracted = hevy_bytes[ex_span[0]:ex_span[1]] + hevy_bytes[set_span[0]:set_span[1]]
+
+    file_id_recs = [r for r in orig_records if r["global_mesg_num"] == fit_binary.FILE_ID_MESG_NUM]
+    file_id_def = next(r for r in file_id_recs if r["is_definition"])
+    file_id_data = next(r for r in file_id_recs if not r["is_definition"])
+
+    mutable = bytearray(original_fit_bytes)
+
+    def _patch_field(field_num: int, value: int):
+        field_info = fit_binary.find_field_offset(original_fit_bytes, file_id_def, file_id_data, field_num)
+        if not field_info:
+            return
+        offset, size, architecture = field_info
+        endian = ">" if architecture == 1 else "<"
+        fmt = endian + {1: "B", 2: "H", 4: "I"}.get(size, "I")
+        struct.pack_into(fmt, mutable, offset, value)
+
+    # Garmin's upload endpoint rejects the spliced file as a "Duplicate
+    # Activity" (409) if it still carries the original watch's real
+    # serial_number alongside the original's real start_time/session content
+    # -- matches hevy2garmin's own generate_fit() convention of always using
+    # this same fixed placeholder. Manufacturer is deliberately left alone
+    # (see this function's own docstring).
+    _patch_field(fit_binary.FILE_ID_SERIAL_NUMBER_FIELD_NUM, fit_binary.PLACEHOLDER_SERIAL_NUMBER)
+
+    # Rebuild the data section record-by-record rather than as one slice point,
+    # DROPPING the original's own pre-existing exercise_title/set records (a
+    # watch's own unreliable auto-detection -- e.g. this activity's entire
+    # 67-minute session as a single "1 set, 4 reps" blob) instead of leaving
+    # them in the file alongside Hevy's real ones. Confirmed live: skipping this
+    # filter double-counts (Total Reps/Sets included both the original's and
+    # Hevy's data, and "Work Time" summed the original's one giant bogus
+    # "active" set duration together with Hevy's real per-set durations).
+    insertion_point = file_id_data["offset"] + file_id_data["length"]
+    excluded_mesg_nums = {fit_binary.EXERCISE_TITLE_MESG_NUM, fit_binary.SET_MESG_NUM}
+    parts = [bytes(mutable[orig_hdr["data_start"]:insertion_point]), extracted]
+    for rec in orig_records:
+        if rec["offset"] < insertion_point:
+            continue  # already covered by the initial slice up to insertion_point
+        if rec["global_mesg_num"] in excluded_mesg_nums:
+            continue
+        parts.append(bytes(mutable[rec["offset"]:rec["offset"] + rec["length"]]))
+    new_data_section = b"".join(parts)
+
+    new_header = bytearray(mutable[:orig_hdr["data_start"]])
+    struct.pack_into("<I", new_header, 4, len(new_data_section))
+    if orig_hdr["header_size"] == 14:
+        struct.pack_into("<H", new_header, 12, crc16(bytes(new_header[:12]), crc=0))
+
+    body = bytes(new_header) + new_data_section
+    return body + struct.pack("<H", crc16(body, crc=0))
 
 
-def _build_and_upload(client, workout: dict, exclude_activity_ids=None, hr_samples=None, progress_cb=None) -> dict:
+def _upload_fit_bytes(client, fit_bytes: bytes, workout: dict, exclude_activity_ids=None, progress_cb=None) -> dict:
     def _p(msg):
         if progress_cb:
             progress_cb(msg)
-    _p(f"Generating FIT file for \"{workout.get('title') or 'Workout'}\"…")
-    if hr_samples:
-        _p(f"Fusing in {len(hr_samples)} real HR samples from the original activity")
+    _p("Uploading to Garmin Connect…")
     with tempfile.TemporaryDirectory() as tmp:
         fit_path = os.path.join(tmp, "workout.fit")
-        h2g_fit.generate_fit(workout, hr_samples, fit_path)
-        _p("Uploading to Garmin Connect…")
+        with open(fit_path, "wb") as f:
+            f.write(fit_bytes)
         result = h2g_garmin.upload_fit(
             client, fit_path,
             workout_start=workout.get("start_time"),
@@ -162,15 +238,55 @@ def _build_and_upload(client, workout: dict, exclude_activity_ids=None, hr_sampl
     return result
 
 
+def _build_and_upload(client, workout: dict, exclude_activity_ids=None, progress_cb=None) -> dict:
+    """No-original-to-splice-into path (create_new): builds a fresh FIT purely
+    from Hevy data. No HR fused in -- there's no watch recording to pull it
+    from for this workout."""
+    def _p(msg):
+        if progress_cb:
+            progress_cb(msg)
+    _p(f"Generating FIT file for \"{workout.get('title') or 'Workout'}\"…")
+    with tempfile.TemporaryDirectory() as tmp:
+        fit_path = os.path.join(tmp, "workout.fit")
+        h2g_fit.generate_fit(workout, None, fit_path)
+        with open(fit_path, "rb") as f:
+            fit_bytes = f.read()
+    return _upload_fit_bytes(client, fit_bytes, workout, exclude_activity_ids, progress_cb)
+
+
 def _garmin_link(activity_id) -> str | None:
     return f"https://connect.garmin.com/modern/activity/{activity_id}" if activity_id else None
 
 
-def preview_push(user_id: str, hevy_run_id: str, progress_cb=None) -> dict:
-    """Match exists: upload a new, correctly-named duplicate activity. The
-    original watch-recorded activity is untouched at this step -- the caller
-    must show the returned link to the user and only call confirm_push() after
-    they've verified it themselves in Garmin Connect."""
+def _backup_dir() -> str:
+    d = os.path.join(os.path.dirname(DB_PATH), "garmin_enrich_backups")
+    os.makedirs(d, exist_ok=True)
+    return d
+
+
+def _backup_path(activity_id: int) -> str:
+    return os.path.join(_backup_dir(), f"{activity_id}.fit")
+
+
+def backup_original_fit(activity_id: int, fit_bytes: bytes) -> str:
+    path = _backup_path(activity_id)
+    with open(path, "wb") as f:
+        f.write(fit_bytes)
+    return path
+
+
+def replace_with_enriched(user_id: str, hevy_run_id: str, progress_cb=None) -> dict:
+    """Match exists: backs up the original watch activity's real FIT bytes,
+    then deletes it and uploads a spliced version (original data + Hevy's
+    exercise structure) in its place. Garmin's own duplicate-detection rejects
+    the spliced upload while the original still exists (confirmed live: 409
+    "Duplicate Activity"), so the delete has to happen before the upload --
+    unlike a pure preview/confirm flow, there's no way to let the user see the
+    result before anything changes on Garmin. The backup exists specifically
+    for this: if the upload fails after the delete, it's used to automatically
+    restore the original rather than leaving the workout with nothing on
+    Garmin. revert_to_backup() covers the other case -- upload succeeded, but
+    the user doesn't like the result after seeing it live."""
     def _p(msg):
         if progress_cb:
             progress_cb(msg)
@@ -191,46 +307,61 @@ def preview_push(user_id: str, hevy_run_id: str, progress_cb=None) -> dict:
     workout = _fetch_raw_hevy_workout(user_id, hevy_run_id)
     _p("Logging into Garmin…")
     client = garmin_sync._login(user_id)
-    _p("Fetching the original activity's recorded heart-rate data…")
-    hr_samples = _fetch_original_hr_samples(client, original_activity_id)
-    if not hr_samples:
-        _p("No HR data found on the original activity — continuing without it")
-    # Excludes the original from the post-upload "find by start time" lookup --
-    # both activities share nearly the same start time, so without this the
-    # lookup could mistake the pre-existing original for the just-created upload.
-    result = _build_and_upload(
-        client, workout, exclude_activity_ids=[original_activity_id],
-        hr_samples=hr_samples, progress_cb=progress_cb,
-    )
-    _p("Preview ready — review it in Garmin Connect before confirming")
+    _p("Downloading the original activity's real FIT recording…")
+    original_fit_bytes = garmin_sync._download_fit_bytes(client, original_activity_id)
+    if not original_fit_bytes:
+        raise RuntimeError("Could not download the original activity's FIT file")
+
+    with tempfile.TemporaryDirectory() as tmp:
+        _p("Splicing exercise data into the original recording (HR/Training Effect/etc. preserved)…")
+        spliced_bytes = _splice_exercise_data(original_fit_bytes, workout, tmp)
+
+    backup_path = backup_original_fit(original_activity_id, original_fit_bytes)
+    _p(f"Backed up the original to {backup_path}")
+
+    _p(f"Deleting original Garmin activity {original_activity_id}…")
+    h2g_garmin.delete_activity(client, original_activity_id)
+
+    try:
+        result = _upload_fit_bytes(client, spliced_bytes, workout, progress_cb=progress_cb)
+    except Exception as e:
+        _p(f"Upload failed after deleting the original ({e}) — restoring from backup…")
+        restore_result = _upload_fit_bytes(client, original_fit_bytes, workout, progress_cb=progress_cb)
+        _p(f"Restored original as activity {restore_result.get('activity_id')}")
+        raise RuntimeError(
+            f"Enriched upload failed, but the original was restored as activity "
+            f"{restore_result.get('activity_id')}: {e}"
+        ) from e
+
+    _p("Done — original replaced with the enriched upload")
     return {
-        "previewActivityId": result.get("activity_id"),
+        "newActivityId": result.get("activity_id"),
         "originalActivityId": original_activity_id,
+        "backupPath": backup_path,
         "garminLink": _garmin_link(result.get("activity_id")),
     }
 
 
-def confirm_push(user_id: str, original_activity_id: int, progress_cb=None) -> None:
-    """User has visually verified the preview duplicate looks correct in Garmin
-    Connect -- deletes the original watch-recorded activity, keeping only the
-    correctly-named duplicate."""
-    if progress_cb:
-        progress_cb(f"Deleting original Garmin activity {original_activity_id}…")
-    client = garmin_sync._login(user_id)
-    h2g_garmin.delete_activity(client, original_activity_id)
-    if progress_cb:
-        progress_cb("Done — original replaced with the correctly-named upload")
+def revert_to_backup(user_id: str, original_activity_id: int, new_activity_id: int, progress_cb=None) -> dict:
+    """Manual undo after replace_with_enriched(): the user saw the new upload
+    live and didn't like it. Deletes the new upload and re-uploads the backup
+    saved at replace time."""
+    def _p(msg):
+        if progress_cb:
+            progress_cb(msg)
+    path = _backup_path(original_activity_id)
+    if not os.path.exists(path):
+        raise RuntimeError(f"No backup found for activity {original_activity_id}")
+    with open(path, "rb") as f:
+        backup_bytes = f.read()
 
-
-def discard_preview(user_id: str, preview_activity_id: int, progress_cb=None) -> None:
-    """Preview didn't look right -- removes the duplicate; the original stays
-    untouched, so nothing is lost and the user can retry."""
-    if progress_cb:
-        progress_cb(f"Discarding preview activity {preview_activity_id}…")
     client = garmin_sync._login(user_id)
-    h2g_garmin.delete_activity(client, preview_activity_id)
-    if progress_cb:
-        progress_cb("Done — preview discarded, original untouched")
+    _p(f"Deleting the enriched upload (activity {new_activity_id})…")
+    h2g_garmin.delete_activity(client, new_activity_id)
+    _p("Restoring the original from backup…")
+    result = _upload_fit_bytes(client, backup_bytes, {"title": "Strength Training"}, progress_cb=progress_cb)
+    _p(f"Done — original restored as activity {result.get('activity_id')}")
+    return {"restoredActivityId": result.get("activity_id"), "garminLink": _garmin_link(result.get("activity_id"))}
 
 
 def create_new(user_id: str, hevy_run_id: str, progress_cb=None) -> dict:

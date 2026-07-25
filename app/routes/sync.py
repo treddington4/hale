@@ -469,10 +469,14 @@ def garmin_enrich_match(hevy_run_id: str, user_id: str = Depends(auth.current_us
         db.close()
 
 
-@router.post("/api/runs/{hevy_run_id}/garmin-enrich/preview")
-def garmin_enrich_preview(hevy_run_id: str, user_id: str = Depends(auth.current_user_id)):
+@router.post("/api/runs/{hevy_run_id}/garmin-enrich/replace")
+def garmin_enrich_replace(hevy_run_id: str, user_id: str = Depends(auth.current_user_id)):
+    """Backs up the original, deletes it, uploads the enriched (spliced)
+    version in its place -- see garmin_enrich.replace_with_enriched's own
+    docstring for why Garmin's duplicate-detection rules out a preview-first
+    flow here, and how the backup is used for automatic rollback on failure."""
     from ..sync import garmin_enrich
-    return _start_enrich_job(hevy_run_id, garmin_enrich.preview_push, user_id, hevy_run_id)
+    return _start_enrich_job(hevy_run_id, garmin_enrich.replace_with_enriched, user_id, hevy_run_id)
 
 
 @router.post("/api/runs/{hevy_run_id}/garmin-enrich/create")
@@ -481,24 +485,19 @@ def garmin_enrich_create(hevy_run_id: str, user_id: str = Depends(auth.current_u
     return _start_enrich_job(hevy_run_id, garmin_enrich.create_new, user_id, hevy_run_id)
 
 
-@router.post("/api/runs/{hevy_run_id}/garmin-enrich/confirm")
-async def garmin_enrich_confirm(hevy_run_id: str, request: Request, user_id: str = Depends(auth.current_user_id)):
+@router.post("/api/runs/{hevy_run_id}/garmin-enrich/revert")
+async def garmin_enrich_revert(hevy_run_id: str, request: Request, user_id: str = Depends(auth.current_user_id)):
+    """Manual undo after a replace: deletes the new enriched upload and
+    restores the backed-up original."""
     from ..sync import garmin_enrich
     body = await request.json()
     original_activity_id = body.get("originalActivityId")
-    if not original_activity_id:
-        raise HTTPException(400, "originalActivityId is required")
-    return _start_enrich_job(hevy_run_id, garmin_enrich.confirm_push, user_id, int(original_activity_id))
-
-
-@router.post("/api/runs/{hevy_run_id}/garmin-enrich/discard")
-async def garmin_enrich_discard(hevy_run_id: str, request: Request, user_id: str = Depends(auth.current_user_id)):
-    from ..sync import garmin_enrich
-    body = await request.json()
-    preview_activity_id = body.get("previewActivityId")
-    if not preview_activity_id:
-        raise HTTPException(400, "previewActivityId is required")
-    return _start_enrich_job(hevy_run_id, garmin_enrich.discard_preview, user_id, int(preview_activity_id))
+    new_activity_id = body.get("newActivityId")
+    if not original_activity_id or not new_activity_id:
+        raise HTTPException(400, "originalActivityId and newActivityId are required")
+    return _start_enrich_job(
+        hevy_run_id, garmin_enrich.revert_to_backup, user_id, int(original_activity_id), int(new_activity_id),
+    )
 
 
 # ---------- Connections (per-user provider credentials — Settings tab) ----------
