@@ -9,6 +9,7 @@ import type { WellnessDay } from "@/lib/api"
 import { ChartCard, CardGrid } from "@/components/home/ChartCard"
 import { DashBar } from "@/components/home/DashBar"
 import { GoalCard } from "@/components/home/GoalCard"
+import { FitnessTrendCard } from "@/components/home/FitnessTrendCard"
 import { Skeleton } from "@/components/ui/skeleton"
 
 const WEEK_MS = 7 * 86400000
@@ -281,6 +282,8 @@ export function HomePage() {
         </CardGrid>
         {breakdown && <div className="text-muted-foreground mt-2 font-mono text-xs">{breakdown}</div>}
       </div>
+
+      <FitnessTrendCard />
 
       <div>
         <h2 className="mb-3 text-sm font-semibold">Goals</h2>

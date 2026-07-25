@@ -2226,6 +2226,45 @@ re-fetching a shifted one.
       torn down after verification.
 - [x] Commit: "Phase 6.2.1: chart pan/zoom, legend audit, fullscreen expand"
 
+### 6.2.2 Home screen fitness trend card — done
+User-reported follow-up: wanted CTL/ATL/TSB's value (established over the
+6.2/6.2.1 conversation) surfaced on Home too, not just buried in Insights —
+plus explicitly said the acronyms themselves are opaque and asked for "trend
+slope of fitness" specifically, not just an instantaneous number, and a
+sensible representation of the other two pieces.
+- [x] New `web/src/components/home/FitnessTrendCard.tsx`, rendered on
+      `HomePage.tsx` right after the top stat strip (prominent placement, as
+      asked). Resolves the acronym confusion once, up front ("Fitness (CTL)
+      · Fatigue (ATL) · Form (TSB)"), then uses only the plain words in the
+      three stat blocks below it — no bare acronym anywhere else on the card.
+      - **Fitness**: current CTL + a trend word (Building/Steady/Declining)
+        comparing today's CTL to ~28 days ago (a ±3-point deadband — CTL is a
+        42-day average, so a single hard week barely moves it; ±3 over 4
+        weeks is a real multi-week swing, not noise), plus a small CTL-only
+        sparkline underneath so the *slope* is visible directly, not just
+        implied by the trend word — this was the specific "trend slope of
+        fitness" ask.
+      - **Fatigue**: current ATL + a trend word (Rising/Easing/Steady)
+        comparing to 7 days ago (ATL's own window), rather than restating
+        the same CTL-vs-ATL relationship Form already encodes.
+      - **Form**: current TSB + the same interpretive band used in this
+        conversation (Fatigued / Balanced / Fresh / Very fresh) — the one of
+        the three numbers that's directly interpretable without needing
+        personal history for context, since it's already a relative
+        difference.
+      - Click-through to `/insights`, matching every other Home card's
+        pattern. Returns `null` (not an empty-state card) when there's under
+        2 days of `DailyMetrics` history — same gating the PMC chart itself
+        uses, gets pulled in automatically once real data exists rather than
+        needing a separate check.
+- [x] Verified: `tsc -b --noEmit`/`oxlint`/`npm run build` clean; screenshotted
+      at desktop + mobile against a throwaway dev container pointed at the
+      real production backend — real values rendered (Fitness 86 ↓
+      Declining, Fatigue 72 ↑ Rising, Form 4 Balanced, sparkline showing the
+      actual CTL climb/plateau/dip shape), mobile wraps the acronym subtitle
+      to two lines without overflow.
+- [x] Commit: "Phase 6.2.2: Home screen fitness trend card"
+
 ### 6.3 Gear tracking
 - [ ] `Gear` table (`id, user_id, name, kind shoe|bike|bike_component,
       parent_gear_id?, start_date, retired_date?, replace_at_mi?`) +
