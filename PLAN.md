@@ -3182,25 +3182,50 @@ Hevy's real per-set durations).
       manual "Revert" affordance (not a push button) shown on already-enriched
       Hevy run cards, calling the existing `/garmin-enrich/revert` endpoint —
       not yet built.
+- **No re-sync needed after a replace**: confirmed with the user — since
+      `replace_with_enriched()` builds the enriched FIT itself, there's nothing
+      new to "discover" by re-syncing Garmin afterward. `_relink_garmin_run()`
+      instead copies the pre-replace Run row's own already-correct fields (HR,
+      timing, splits, weather — none of that changed) onto a new row keyed by
+      the new activity id directly, taking `exercise_sets_json`/`name` from the
+      Hevy row's own values. The *only* live Garmin sync left in
+      `process_pending_enrichments()` is the one used to discover the
+      *original* watch-recorded activity in the first place (still genuinely
+      needed — Garmin has no auto-sync schedule of its own).
 - [x] Verified end-to-end against the real Hevy/Garmin APIs and the user's real
       account (there is no throwaway-copy equivalent for a third-party service):
       real backup saved, real original deleted, real replacement uploaded and
       visually confirmed correct by the user (exercises/weights/reps, HR,
       Training Effect, Respiration, Recovery HR, Sweat Loss all present).
-      Automation additionally ran for real against the account's full backlog of
-      16 historical Hevy strength workouts (triggered sooner than planned, by a
-      verification command that hit a stale pre-migration image and fell through
-      to the real automation path instead of a no-op check) — 9 matched and were
-      successfully replaced (each with its own backup saved first); 7 have no
-      Garmin counterpart at all (April 2025 sessions, watch likely not worn) and
-      correctly remain pending. One replacement's new activity id wasn't
-      confirmed by the upload response (Garmin indexing lag) and was resolved
-      manually afterward — this exposed a real gap (leaving
-      `garmin_enriched_activity_id` unset risked the same workout being
-      reprocessed against its own already-good replacement on a later pass) that
-      is now fixed: unconfirmed ids are retried via a local re-match immediately
-      after the pass's own Garmin sync, before the function returns, rather than
-      left to a future pass to rediscover.
+- **Real backlog run + two real bugs found and fixed**: automation ran for
+      real against the account's full backlog of 16 historical Hevy strength
+      workouts (triggered sooner than planned, by a verification command that
+      hit a stale pre-migration image and fell through to the real automation
+      path instead of a no-op check).
+      - 7 predate the user's Garmin watch entirely (acquired 2025-12-25) and
+        can never match — marked with a `-1` sentinel in
+        `garmin_enriched_activity_id` so they're excluded from the pending
+        query without needing a real activity id.
+      - The other 9 are real, correctly matched and replaced — but an earlier
+        version of this code (before the "no re-sync needed" fix above) had
+        already deleted their old rows relying on a follow-up quick sync to
+        re-discover the new ones, which never worked: `sync_garmin_activities`
+        only fetches the 10 *most recent* activities, and these replacements
+        are chronologically old, so they were silently missing from our own
+        Run table entirely (backup files were always safe throughout).
+        Backfilled with a **targeted per-ID fetch, not a full backlog crawl**
+        (confirmed as the preferred approach with the user) — but
+        `client.get_activity(id)` turned out to return a completely different
+        nested schema (`summaryDTO`/`activityTypeDTO`) than
+        `_process_activity()` expects (the flat shape `get_activities()`/
+        `get_activities_by_date()` return), so first attempt silently
+        populated every Run field as `None`/`0` rather than erroring. Real fix:
+        use `get_activity(id)` only to read the real date from
+        `summaryDTO.startTimeLocal`, then `get_activities_by_date(date, date)`
+        to get the actually-compatible flat dict before calling
+        `_process_activity_with_retry`. **Worth remembering**: never reach for
+        `get_activity()` when feeding data into `_process_activity()` — always
+        `get_activities()`/`get_activities_by_date()`.
 - [x] Commit per sub-task.
 
 ---
