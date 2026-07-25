@@ -107,6 +107,13 @@ class Run(Base):
     # matching it to anything, rather than needing a migration to null it out.
     gear_id = Column(String, nullable=True)
 
+    # Phase 23 — set on a source="hevy" row once garmin_enrich.process_pending_
+    # enrichments has successfully replaced its matched Garmin activity with an
+    # enriched (spliced) upload. Doubles as both the "don't re-process this
+    # workout on the next auto-sync pass" marker and the pointer needed for a
+    # manual revert later (which Garmin activity to delete-and-restore).
+    garmin_enriched_activity_id = Column(Integer, nullable=True)
+
 
 class DailySteps(Base):
     """Garmin-only daily step count. Unlike Run rows (one per activity), this is one row

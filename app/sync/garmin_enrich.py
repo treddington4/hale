@@ -382,7 +382,7 @@ def create_new(user_id: str, hevy_run_id: str, progress_cb=None) -> dict:
     finally:
         db.close()
     if match:
-        raise ValueError("A matching Garmin activity exists -- use preview_push instead")
+        raise ValueError("A matching Garmin activity exists -- use replace_with_enriched instead")
 
     workout = _fetch_raw_hevy_workout(user_id, hevy_run_id)
     _p("Logging into Garmin…")
@@ -393,3 +393,132 @@ def create_new(user_id: str, hevy_run_id: str, progress_cb=None) -> dict:
         "activityId": result.get("activity_id"),
         "garminLink": _garmin_link(result.get("activity_id")),
     }
+
+
+def process_pending_enrichments(user_id: str, progress_cb=None) -> int:
+    """Automates replace_with_enriched() for every not-yet-processed Hevy
+    strength workout that already has a matching Garmin activity -- called
+    after both the scheduled auto-sync tick and a manual Hevy "Sync Now"
+    (routes/sync.py), not just from a UI button. Deliberately does NOT fall
+    back to create_new() when no match is found: Hevy syncs are typically
+    a few minutes ahead of the watch's own upload, so "no match yet" usually
+    just means the Garmin side hasn't arrived -- creating a fresh activity
+    now would risk a real duplicate once the actual watch recording shows up.
+    Left pending, it's picked up automatically on the next pass instead.
+
+    Garmin has no auto-sync schedule of its own (manual-only, rate-limit-
+    sensitive -- see registry.py) so a workout's Garmin counterpart may not be
+    in our own Run table yet even if it's already on Garmin's servers. A
+    single extra `garmin_sync.sync_garmin_activities` call is made -- once per
+    call to this function, not once per pending workout -- to give same-day
+    uploads a chance to appear before this pass gives up on them; the
+    already-established rate-limit cooldown/backoff in garmin_sync makes this
+    safe to call opportunistically like this.
+
+    Manual revert stays exactly as before (routes/sync.py's /revert endpoint,
+    garmin_enrich.revert_to_backup) -- automating the push doesn't touch that.
+    """
+    import logging
+    log = logging.getLogger("runlog")
+
+    def _p(msg):
+        if progress_cb:
+            progress_cb(msg)
+        log.info(f"garmin_enrich auto: {msg}")
+
+    db = SessionLocal()
+    try:
+        pending_ids = [
+            r.id for r in db.query(Run).filter(
+                Run.source == "hevy",
+                Run.garmin_enriched_activity_id.is_(None),
+                owned_by(Run.user_id, user_id),
+            ).all()
+        ]
+    finally:
+        db.close()
+    if not pending_ids:
+        return 0
+
+    _p(f"Checking {len(pending_ids)} not-yet-enriched Hevy workout(s) for a Garmin match…")
+    synced_garmin_this_pass = False
+    enriched_count = 0
+    unresolved_ids = []  # replace succeeded but upload_fit couldn't confirm the new activity id yet
+
+    for hevy_run_id in pending_ids:
+        db = SessionLocal()
+        try:
+            hevy_run = db.get(Run, hevy_run_id)
+            match = find_matching_garmin_run(db, hevy_run, user_id) if hevy_run else None
+        finally:
+            db.close()
+
+        if not match and not synced_garmin_this_pass:
+            synced_garmin_this_pass = True
+            try:
+                _p("No Garmin match yet — syncing Garmin to check for a same-day upload…")
+                garmin_sync.sync_garmin_activities(user_id)
+            except Exception as e:
+                _p(f"Garmin sync attempt failed (will retry next pass): {e}")
+            db = SessionLocal()
+            try:
+                hevy_run = db.get(Run, hevy_run_id)
+                match = find_matching_garmin_run(db, hevy_run, user_id) if hevy_run else None
+            finally:
+                db.close()
+
+        if not match:
+            continue  # still nothing to match -- leave pending for the next pass
+
+        try:
+            result = replace_with_enriched(user_id, hevy_run_id, progress_cb=progress_cb)
+        except Exception as e:
+            _p(f"Auto-enrich failed for {hevy_run_id}: {e}")
+            continue
+
+        db = SessionLocal()
+        try:
+            hevy_run = db.get(Run, hevy_run_id)
+            # Leaves garmin_enriched_activity_id unset (still NULL) when the id
+            # couldn't be confirmed yet -- resolved in the follow-up pass below,
+            # once the post-enrich sync has had a chance to pull the real
+            # activity in. Deliberately not marked "done" with an unknown id:
+            # NULL is what the pending-query already checks for, so leaving it
+            # NULL here (rather than some placeholder value) means a workout
+            # whose id-lookup never resolves simply stays eligible for retry
+            # instead of silently getting stuck.
+            if result.get("newActivityId"):
+                hevy_run.garmin_enriched_activity_id = result["newActivityId"]
+            else:
+                unresolved_ids.append(hevy_run_id)
+            # The pre-replace Garmin Run row now points at a deleted activity --
+            # remove it rather than leaving a dangling reference; the real
+            # replacement gets its own row on the next Garmin sync below.
+            stale_run = db.get(Run, f"garmin_{result['originalActivityId']}")
+            if stale_run:
+                db.delete(stale_run)
+            db.commit()
+        finally:
+            db.close()
+        enriched_count += 1
+
+    if enriched_count:
+        try:
+            _p(f"Syncing Garmin to pull in {enriched_count} replacement activity(ies)…")
+            garmin_sync.sync_garmin_activities(user_id)
+        except Exception as e:
+            _p(f"Post-enrich Garmin sync failed (replacement will appear on next sync): {e}")
+
+    for hevy_run_id in unresolved_ids:
+        db = SessionLocal()
+        try:
+            hevy_run = db.get(Run, hevy_run_id)
+            match = find_matching_garmin_run(db, hevy_run, user_id) if hevy_run else None
+            if match:
+                hevy_run.garmin_enriched_activity_id = _garmin_activity_id(match.id)
+                db.commit()
+                _p(f"Resolved replacement activity id for {hevy_run_id}: {match.id}")
+        finally:
+            db.close()
+
+    return enriched_count

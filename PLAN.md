@@ -3164,15 +3164,43 @@ Hevy's real per-set durations).
       `POST .../garmin-enrich/replace`, `POST .../garmin-enrich/create`,
       `POST .../garmin-enrich/revert`, `GET .../garmin-enrich/status` — same
       background-job-with-live-status shape as quick sync, keyed by hevy_run_id.
-- [ ] 23.5 Frontend: on a Hevy run card with a matched Garmin strength activity, a
-      "Push to Garmin" action calling `/replace` (or `/create` when unmatched),
-      showing the live job log, then the resulting Garmin link with a "revert"
-      option if the user doesn't like what they see.
+- [x] 23.5 **Automated, not manual-button-triggered** — confirmed with the user:
+      the push itself should be automatic; only revert stays a manual action.
+      `Run.garmin_enriched_activity_id` (new nullable column) marks a Hevy run as
+      already processed, so a pass only ever considers not-yet-enriched workouts.
+      `garmin_enrich.process_pending_enrichments(user_id)`: for each pending Hevy
+      strength workout, checks for a local match; if none yet, triggers exactly
+      one `garmin_sync.sync_garmin_activities` call per pass (not per workout) to
+      give a same-day watch upload a chance to arrive, then re-checks. Deliberately
+      does NOT fall back to `create_new()` when still no match — Garmin has no
+      auto-sync schedule of its own (manual-only, rate-limit-sensitive), so "no
+      match yet" usually just means the watch side hasn't landed, and creating a
+      fresh activity now would risk a real duplicate once the actual recording
+      shows up; left pending, it's retried on the next pass instead. Hooked into
+      both `_auto_sync()`'s scheduled tick and manual Hevy "Sync Now"
+      (`routes/sync.py`) — same live job log either way. Frontend still needs a
+      manual "Revert" affordance (not a push button) shown on already-enriched
+      Hevy run cards, calling the existing `/garmin-enrich/revert` endpoint —
+      not yet built.
 - [x] Verified end-to-end against the real Hevy/Garmin APIs and the user's real
       account (there is no throwaway-copy equivalent for a third-party service):
       real backup saved, real original deleted, real replacement uploaded and
       visually confirmed correct by the user (exercises/weights/reps, HR,
       Training Effect, Respiration, Recovery HR, Sweat Loss all present).
+      Automation additionally ran for real against the account's full backlog of
+      16 historical Hevy strength workouts (triggered sooner than planned, by a
+      verification command that hit a stale pre-migration image and fell through
+      to the real automation path instead of a no-op check) — 9 matched and were
+      successfully replaced (each with its own backup saved first); 7 have no
+      Garmin counterpart at all (April 2025 sessions, watch likely not worn) and
+      correctly remain pending. One replacement's new activity id wasn't
+      confirmed by the upload response (Garmin indexing lag) and was resolved
+      manually afterward — this exposed a real gap (leaving
+      `garmin_enriched_activity_id` unset risked the same workout being
+      reprocessed against its own already-good replacement on a later pass) that
+      is now fixed: unconfirmed ids are retried via a local re-match immediately
+      after the pass's own Garmin sync, before the function returns, rather than
+      left to a future pass to rediscover.
 - [x] Commit per sub-task.
 
 ---

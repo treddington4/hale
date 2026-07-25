@@ -77,6 +77,23 @@ def _auto_sync():
             except Exception as e:
                 stats.record_sync(source, user_id, error=str(e))
                 log.warning(f"Auto-sync skipped for {user_id}/{source}: {e}")
+            if source == "hevy":
+                _run_pending_enrichments(user_id)
+
+
+def _run_pending_enrichments(user_id: str, progress_cb=None):
+    """Automates Phase 23's Garmin enrichment for newly-synced Hevy workouts —
+    called after both this scheduled tick and a manual Hevy "Sync Now" below.
+    Never fatal to the caller's own sync: a rate limit or transient Garmin
+    error here shouldn't be reported as a Hevy sync failure."""
+    if not _has_credential(user_id, "hevy"):
+        return
+    import logging
+    from ..sync import garmin_enrich
+    try:
+        garmin_enrich.process_pending_enrichments(user_id, progress_cb=progress_cb)
+    except Exception as e:
+        logging.getLogger("runlog").warning(f"Auto-enrich pass failed for {user_id}: {e}")
 
 
 def _has_credential(user_id: str, provider: str) -> bool:
@@ -137,6 +154,8 @@ def _run_quick_sync(user_id: str, source: str):
             job["finishedAt"] = datetime.now(timezone.utc).isoformat()
         stats.record_sync(source, user_id, count=n)
         _quick_sync_progress(user_id, source, f"Done — {n} activities upserted")
+        if source == "hevy":
+            _run_pending_enrichments(user_id, progress_cb=lambda msg: _quick_sync_progress(user_id, source, msg))
     except Exception as e:
         msg = str(e)
         with _quick_sync_lock:
