@@ -392,6 +392,115 @@ def hevy_status(user_id: str = Depends(auth.current_user_id)):
     return {"configured": _has_credential(user_id, "hevy")}
 
 
+# ---------- Garmin enrich (Phase 23) — push Hevy exercise data onto a matching
+# Garmin activity. Same background-job-with-live-status shape as quick sync above
+# (a Garmin login + FIT upload can take several seconds) — see garmin_enrich.py's
+# own docstring for why this is a two-step preview/confirm flow rather than a
+# direct in-place edit. Keyed by hevy_run_id rather than (user_id, source) since
+# each push targets one specific run, not a whole provider. ----------
+_ENRICH_LOG_LIMIT = 50
+_enrich_lock = threading.Lock()
+_enrich_jobs: dict = {}
+
+
+def _get_enrich_job(hevy_run_id: str) -> dict:
+    job = _enrich_jobs.setdefault(hevy_run_id, _new_job_state())
+    if "result" not in job:
+        job["result"] = None
+    return job
+
+
+def _enrich_progress(hevy_run_id: str, msg: str):
+    with _enrich_lock:
+        job = _get_enrich_job(hevy_run_id)
+        job["log"].append(f"{datetime.now().strftime('%H:%M:%S')}  {msg}")
+        job["log"] = job["log"][-_ENRICH_LOG_LIMIT:]
+
+
+def _run_enrich_job(hevy_run_id: str, fn, *args):
+    try:
+        cb = lambda msg: _enrich_progress(hevy_run_id, msg)
+        result = fn(*args, progress_cb=cb)
+        with _enrich_lock:
+            job = _get_enrich_job(hevy_run_id)
+            job["status"] = "done"
+            job["result"] = result
+            job["finishedAt"] = datetime.now(timezone.utc).isoformat()
+    except Exception as e:
+        with _enrich_lock:
+            job = _get_enrich_job(hevy_run_id)
+            job["status"] = "error"
+            job["error"] = str(e)
+            job["finishedAt"] = datetime.now(timezone.utc).isoformat()
+        _enrich_progress(hevy_run_id, f"Error: {e}")
+
+
+def _start_enrich_job(hevy_run_id: str, fn, *args):
+    with _enrich_lock:
+        job = _get_enrich_job(hevy_run_id)
+        if job["status"] == "running":
+            raise HTTPException(409, "A push is already running for this run")
+        job.update({"status": "running", "log": [], "result": None,
+                    "startedAt": datetime.now(timezone.utc).isoformat(), "finishedAt": None, "error": None})
+    threading.Thread(target=_run_enrich_job, args=(hevy_run_id, fn, *args), daemon=True).start()
+    return {"status": "started"}
+
+
+@router.get("/api/runs/{hevy_run_id}/garmin-enrich/status")
+def garmin_enrich_status(hevy_run_id: str, user_id: str = Depends(auth.current_user_id)):
+    with _enrich_lock:
+        return dict(_get_enrich_job(hevy_run_id))
+
+
+@router.get("/api/runs/{hevy_run_id}/garmin-enrich/match")
+def garmin_enrich_match(hevy_run_id: str, user_id: str = Depends(auth.current_user_id)):
+    """Whether this Hevy run has a matching Garmin activity already — determines
+    whether the frontend offers "Push (preview)" or "Push (create new)"."""
+    from ..sync import garmin_enrich
+    from ..models import Run
+    db = SessionLocal()
+    try:
+        hevy_run = db.get(Run, hevy_run_id)
+        if not hevy_run or hevy_run.source != "hevy":
+            raise HTTPException(404, "Not a Hevy run")
+        match = garmin_enrich.find_matching_garmin_run(db, hevy_run, user_id)
+        return {"hasMatch": match is not None, "garminActivityId": garmin_enrich._garmin_activity_id(match.id) if match else None}
+    finally:
+        db.close()
+
+
+@router.post("/api/runs/{hevy_run_id}/garmin-enrich/preview")
+def garmin_enrich_preview(hevy_run_id: str, user_id: str = Depends(auth.current_user_id)):
+    from ..sync import garmin_enrich
+    return _start_enrich_job(hevy_run_id, garmin_enrich.preview_push, user_id, hevy_run_id)
+
+
+@router.post("/api/runs/{hevy_run_id}/garmin-enrich/create")
+def garmin_enrich_create(hevy_run_id: str, user_id: str = Depends(auth.current_user_id)):
+    from ..sync import garmin_enrich
+    return _start_enrich_job(hevy_run_id, garmin_enrich.create_new, user_id, hevy_run_id)
+
+
+@router.post("/api/runs/{hevy_run_id}/garmin-enrich/confirm")
+async def garmin_enrich_confirm(hevy_run_id: str, request: Request, user_id: str = Depends(auth.current_user_id)):
+    from ..sync import garmin_enrich
+    body = await request.json()
+    original_activity_id = body.get("originalActivityId")
+    if not original_activity_id:
+        raise HTTPException(400, "originalActivityId is required")
+    return _start_enrich_job(hevy_run_id, garmin_enrich.confirm_push, user_id, int(original_activity_id))
+
+
+@router.post("/api/runs/{hevy_run_id}/garmin-enrich/discard")
+async def garmin_enrich_discard(hevy_run_id: str, request: Request, user_id: str = Depends(auth.current_user_id)):
+    from ..sync import garmin_enrich
+    body = await request.json()
+    preview_activity_id = body.get("previewActivityId")
+    if not preview_activity_id:
+        raise HTTPException(400, "previewActivityId is required")
+    return _start_enrich_job(hevy_run_id, garmin_enrich.discard_preview, user_id, int(preview_activity_id))
+
+
 # ---------- Connections (per-user provider credentials — Settings tab) ----------
 @router.get("/api/connections")
 def get_connections(user_id: str = Depends(auth.current_user_id)):

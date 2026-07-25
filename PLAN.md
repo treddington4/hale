@@ -3071,6 +3071,92 @@ retrospective analysis; real live control is coming, just not yet.
 
 ---
 
+## Phase 23 — Push Hevy exercise data onto the matching Garmin activity
+
+User records strength workouts on both a Garmin watch (auto-detected, unreliable —
+often one giant `UNKNOWN`-category set spanning the whole session, weight always
+null) and Hevy (real per-set exercise/reps/weight, logged manually) for the same
+physical workout. Ask: enrich the Garmin activity with Hevy's real data instead of
+leaving it useless.
+
+**Key finding (changes the naive approach)**: Garmin's `exerciseSets` PUT endpoint
+returns success (204) on a watch-recorded activity but silently drops the exercise
+*names* — the Garmin Connect app then shows every exercise as "Unknown" despite the
+write succeeding. Confirmed via `drkostas/hevy2garmin` (MIT-licensed OSS project
+solving this exact problem, github.com/drkostas/hevy2garmin — 433+ Hevy-exercise
+mappings, live-confirmed via their issue #159). Named exercises only render
+correctly on activities Garmin considers "uploaded" (FIT manufacturer =
+`DEVELOPMENT`), never on watch-recorded ones.
+
+**Resolved design** (three rounds of confirmation with the user):
+- **Reuse hevy2garmin as a pip dependency**, not a vendored copy or a standalone
+  service — `pip install hevy2garmin` (garminconnect `>=0.3.0,<0.4.0` is compatible
+  with our pinned `0.3.6`). Import only its data/logic modules
+  (`mapper.lookup_exercise`, `template_map.TEMPLATE_TO_GARMIN`, `fit.generate_fit`,
+  `garmin.upload_fit`/`delete_activity`/`rename_activity`/`set_description`,
+  `merge.build_exercise_sets_payload`/category-decode helpers) — never its own
+  `auth`/`db`/`server` modules. We authenticate with our own existing
+  `garmin_sync._login(user_id)` session, not their `garmin-auth` package, and don't
+  run their FastAPI dashboard/Postgres backend. This keeps the mapping table
+  "someone else's problem to maintain" (upstream `pip install -U hevy2garmin`
+  pulls improvements) rather than a copy we'd have to hand-update.
+- **Strategy: "replace," but the destructive step is always human-gated.**
+  hevy2garmin's own "replace" strategy (upload a correctly-named duplicate, fuse in
+  the watch's HR, then auto-delete the original) is NOT run automatically here.
+  Instead, a two-step flow:
+  1. **Preview** — build a FIT file from the Hevy workout (reconstructed from our
+     own stored `Run.exercise_sets_json` + `date`/`start_time`/`moving_time_sec`,
+     no second Hevy API call needed) via `hevy2garmin.fit.generate_fit`, upload it
+     via `hevy2garmin.garmin.upload_fit` as a **brand-new, separate activity** —
+     the original watch-recorded activity is never touched at this step. Surface a
+     link/reference to the new activity so the user can open Garmin Connect
+     themselves and visually confirm it looks right.
+  2. **Confirm or discard** — a "Looks good, replace original" action (deletes the
+     original watch-recorded activity via `hevy2garmin.garmin.delete_activity`,
+     keeping only the correctly-named duplicate) or a "Discard" action (deletes the
+     preview duplicate, original stays untouched, nothing lost). Nothing destructive
+     ever happens without this explicit second click.
+- **Matching**: since both sources are already synced into our own `Run` table, do
+  the Hevy-workout ↔ Garmin-activity match as a pure local DB query (date +
+  overlapping `start_time`/`moving_time_sec` within ~30min), not a live re-fetch of
+  Garmin's activity list the way hevy2garmin's own `matcher.py`/`find_matching_
+  garmin_activity` do — we already have both rows.
+- **Exercise-template capture**: `hevy_sync.py`'s `_exercise_sets_from_workout`
+  currently only stores the flattened exercise title, not Hevy's
+  `exercise_template_id` — add it to a future `exercise_sets_json` field so
+  `mapper.lookup_exercise(name, template_id)` can use the language-independent
+  template-id match (exact) instead of falling back to English-name matching
+  (still decent — 433+ names covered — but template-id is the more reliable path
+  hevy2garmin itself prefers). Historical rows without it just fall back to
+  name-matching.
+- [ ] 23.1 Add `hevy2garmin` to `requirements.txt`; confirm its extra transitive
+      deps (fastapi/uvicorn/jinja2/psycopg2-binary/pynacl/garmin-auth/curl_cffi —
+      all unused by us, pulled in only because they're hard dependencies of the
+      package) install cleanly in the existing `python:3.12-slim` image without
+      version conflicts against our own pinned `fastapi==0.115.0`/etc.
+- [ ] 23.2 `hevy_sync.py`: capture `exercise_template_id` per exercise going
+      forward.
+- [ ] 23.3 New module (e.g. `app/sync/garmin_enrich.py`): local DB-based matcher;
+      `preview_push(user_id, hevy_run_id) -> {previewActivityId, garminLink}`;
+      `confirm_push(user_id, hevy_run_id, preview_activity_id)` (deletes original,
+      keeps duplicate); `discard_preview(preview_activity_id)` (deletes the
+      duplicate, original untouched).
+- [ ] 23.4 Endpoints in `routes/sync.py` or a new small router:
+      `POST /api/runs/{hevy_run_id}/garmin-enrich/preview`,
+      `POST /api/runs/{hevy_run_id}/garmin-enrich/confirm`,
+      `POST /api/runs/{hevy_run_id}/garmin-enrich/discard`.
+- [ ] 23.5 Frontend: on a Hevy run card with a matched Garmin strength activity,
+      a "Push to Garmin" action leading to preview → confirm/discard, matching the
+      two-step gate above exactly (no single-click path to the destructive delete).
+- [ ] Verify: this writes to the user's REAL Garmin account — there is no
+      throwaway-copy equivalent for a third-party service. Preview-only testing
+      (upload the duplicate, inspect it, then discard) is safe and repeatable;
+      the confirm (delete-original) step must only ever be exercised by the user
+      themselves via the real UI, never as part of automated verification.
+- [ ] Commit per sub-task.
+
+---
+
 ## Cross-cutting features (slot in any time after the listed dependency)
 
 - [ ] **Daily AI insight card** (after 0.3): Sonnet one-shot (separate short-lived SDK

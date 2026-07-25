@@ -6,6 +6,7 @@ python-dotenv==1.0.1
 SQLAlchemy==2.0.35
 garminconnect==0.3.6
 fitparse==1.2.0
+hevy2garmin==0.8.0
 claude-agent-sdk==0.2.116
 PyJWT==2.10.1
 cryptography==43.0.3

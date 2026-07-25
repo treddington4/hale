@@ -96,6 +96,11 @@ def _exercise_sets_from_workout(workout: dict) -> list:
     out = []
     for ex in workout.get("exercises", []):
         exercise_name = _field(ex, "title", "name") or "Unknown exercise"
+        # Hevy's exercise_template_id is stable across the user's Hevy display
+        # language (unlike the free-text title) -- captured so a later Garmin
+        # push (Phase 23) can do an exact hevy2garmin template-id lookup instead
+        # of falling back to English-name matching.
+        template_id = _field(ex, "exercise_template_id", "exerciseTemplateId")
         superset_raw = _field(ex, "superset_id", "supersetsId", "supersetId")
         superset_group = str(superset_raw) if superset_raw is not None else None
         for s in ex.get("sets", []):
@@ -104,6 +109,7 @@ def _exercise_sets_from_workout(workout: dict) -> list:
             duration_sec = _field(s, "duration_seconds", "duration")
             out.append({
                 "exercise": exercise_name,
+                "exerciseTemplateId": template_id,
                 "setType": set_type if set_type and set_type != "normal" else None,
                 "reps": s.get("reps"),
                 "weightLb": round(weight_kg * KG_TO_LB, 1) if weight_kg else None,
