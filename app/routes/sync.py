@@ -136,7 +136,7 @@ def _run_quick_sync(user_id: str, source: str):
             job["count"] = n
             job["finishedAt"] = datetime.now(timezone.utc).isoformat()
         stats.record_sync(source, user_id, count=n)
-        _quick_sync_progress(user_id, source, f"Done — {n} runs upserted")
+        _quick_sync_progress(user_id, source, f"Done — {n} activities upserted")
     except Exception as e:
         msg = str(e)
         with _quick_sync_lock:
@@ -289,7 +289,7 @@ def _run_backlog_sync(user_id: str, source: str):
             job["count"] = n
             job["finishedAt"] = datetime.now(timezone.utc).isoformat()
         stats.record_sync(f"{source}_backlog", user_id, count=n)
-        _backlog_progress(user_id, source, f"Done — {n} runs upserted")
+        _backlog_progress(user_id, source, f"Done — {n} activities upserted")
     except Exception as e:
         msg = str(e)
         with _backlog_lock:

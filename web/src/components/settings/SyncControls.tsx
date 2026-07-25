@@ -28,7 +28,7 @@ function JobPanel({
     return (
       <div className="mt-2">
         <div className="text-muted-foreground text-xs">
-          {job.count} run{job.count === 1 ? "" : "s"} synced so far…
+          {job.count} {job.count === 1 ? "activity" : "activities"} synced so far…
         </div>
         {job.log.length > 0 && <LogBlock lines={job.log} />}
       </div>
@@ -46,7 +46,7 @@ function JobPanel({
     return (
       <div className="mt-2">
         <div className="text-muted-foreground text-xs">
-          Last backlog sync: {new Date(job.lastCompleted.syncedAt).toLocaleString()} · {job.lastCompleted.count} runs
+          Last backlog sync: {new Date(job.lastCompleted.syncedAt).toLocaleString()} · {job.lastCompleted.count} activities
         </div>
         {job.log.length > 0 && <LogBlock lines={job.log} />}
       </div>

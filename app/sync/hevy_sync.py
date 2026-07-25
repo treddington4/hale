@@ -166,7 +166,14 @@ def sync_hevy_workouts(user_id: str, progress_cb=None) -> int:
         count = 0
         page = 1
         while True:
-            events = _request(api_key, "/workouts/events", {"since": since, "page": page, "pageSize": PAGE_SIZE})
+            # Real response is an envelope, {"page", "page_count", "events": [...]}
+            # -- NOT a bare list. Confirmed directly against the live API after a
+            # real sync crashed ('str' object has no attribute 'get', i.e. iterating
+            # the envelope dict's own string keys instead of its "events" array);
+            # the Hevy MCP server used to research this shape had apparently
+            # unwrapped the envelope before presenting results, hiding this.
+            response = _request(api_key, "/workouts/events", {"since": since, "page": page, "pageSize": PAGE_SIZE})
+            events = response.get("events", [])
             if not events:
                 break
             for event in events:
@@ -182,7 +189,7 @@ def sync_hevy_workouts(user_id: str, progress_cb=None) -> int:
                         if progress_cb:
                             progress_cb(f"Synced {workout.get('title') or 'workout'} ({(workout.get('start_time') or workout.get('startTime') or '')[:10]})", count)
             db.commit()
-            if len(events) < PAGE_SIZE:
+            if page >= response.get("page_count", 1):
                 break
             page += 1
         return count
@@ -203,7 +210,10 @@ def sync_all_hevy_workouts(user_id: str, progress_cb=None) -> int:
         count = 0
         page = 1
         while True:
-            workouts = _request(api_key, "/workouts", {"page": page, "pageSize": PAGE_SIZE})
+            # Same envelope shape as the events endpoint -- {"page", "page_count",
+            # "workouts": [...]}, see sync_hevy_workouts's comment above.
+            response = _request(api_key, "/workouts", {"page": page, "pageSize": PAGE_SIZE})
+            workouts = response.get("workouts", [])
             if not workouts:
                 break
             for workout in workouts:
@@ -212,7 +222,7 @@ def sync_all_hevy_workouts(user_id: str, progress_cb=None) -> int:
                 if progress_cb:
                     progress_cb(f"Synced {workout.get('title') or 'workout'} ({(workout.get('start_time') or workout.get('startTime') or '')[:10]})", count)
             db.commit()
-            if len(workouts) < PAGE_SIZE:
+            if page >= response.get("page_count", 1):
                 break
             page += 1
         return count

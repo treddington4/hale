@@ -2595,6 +2595,43 @@ runtime.
       typed into this chat.
 - [x] Commit: "Phase 6.5: Hevy strength-workout sync + common integration registry"
 
+### 6.5.1 Hevy sync — real-world bug fixes (found on first live use) — done
+User connected their real API key and hit two issues immediately.
+- [x] **Pagination crash**: `sync_hevy_workouts`/`sync_all_hevy_workouts` treated
+      `_request()`'s JSON response as a bare array. The real Hevy API wraps every
+      paginated list in an envelope object — `{"page", "page_count", "events"|
+      "workouts": [...]}` — not a bare list. This had been hidden during earlier
+      research because the Hevy MCP server silently unwrapped envelopes before
+      returning results; confirmed directly via raw `requests.get()` calls
+      bypassing the MCP entirely. Iterating the envelope dict's own string keys
+      (`"page"`, `"page_count"`, ...) produced the exact reported crash —
+      `'str' object has no attribute 'get'` — the moment `event.get("type")` ran
+      on the plain string `"page"`. Fixed by unwrapping `response.get("events"|
+      "workouts", [])` and terminating pagination on `page >= response.get(
+      "page_count", 1)` instead of the old (also wrong) `len(events) < PAGE_SIZE`
+      heuristic.
+- [x] **"runs" wording on a strength app**: the shared quick-sync/backlog-sync
+      status messages (`routes/sync.py`) and `SyncControls.tsx`'s progress text
+      said "N runs synced"/"N runs upserted" regardless of source — nonsensical
+      for a lifting app. Changed to "activities" everywhere in that shared path
+      (both `_run_quick_sync`/`_run_backlog_sync` messages, and both instances in
+      `SyncControls.tsx`'s `JobPanel`), matching the user's own framing that the
+      whole data model should generalize toward "activities" rather than
+      "runs" — full generalization is a larger follow-up (see the Connections/
+      activities-model redesign discussion), this was just the immediate
+      user-visible wording.
+- [x] Verified against the real Hevy API (not a mock) using the existing
+      throwaway `runlog-hevy-debug` container/volume (a copy of production's DB,
+      already holding the user's real, already-saved Hevy API key) — both
+      `sync_all_hevy_workouts` (full backlog) and `sync_hevy_workouts`
+      (incremental/events) correctly paginated through all 17 real workouts with
+      no crash. Rebuilt and redeployed the real production container; confirmed
+      live via `POST /api/sync/hevy` → `GET /api/sync/hevy/status` showing
+      `"status":"done"`, `"count":17`, `"error":null`, and the log's final line
+      reading "Done — 17 activities upserted". Debug container and volume
+      (`runlog_hevy_debug_data`) removed afterward.
+- [x] Commit: "Fix Hevy sync pagination crash and runs->activities wording"
+
 ---
 
 ## Phase 7 — Geospatial pipeline
