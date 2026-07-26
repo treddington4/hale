@@ -400,6 +400,19 @@ def readiness(db, user_id: str = DEFAULT_USER_ID, date=None) -> dict:
     if sleep_seconds is not None and sleep_seconds < 6.5 * 3600:
         flags.append("sleep_deficit")
 
+    # P11 — respiration baseline drift (waking rate is more stable than exercise rate)
+    resp_today = today_row.avg_waking_respiration_rate if today_row else None
+    resp_baseline = _trailing_avg("avg_waking_respiration_rate")
+    resp_delta = round((resp_today - resp_baseline) * 10) / 10 if (resp_today is not None and resp_baseline is not None) else None
+    if resp_delta is not None and resp_delta >= 1.0:
+        flags.append("respiration_elevated")
+
+    # P11 — Garmin's own training readiness score (0-100) as a cross-check
+    garmin_readiness = today_row.training_readiness_score if today_row else None
+    garmin_readiness_level = today_row.training_readiness_level if today_row else None
+    if garmin_readiness is not None and garmin_readiness < 50:
+        flags.append("garmin_readiness_low")
+
     runs = _all_runs(db, "Run", user_id)
     last7_start = (target - timedelta(days=6)).isoformat()
     prior28_start = (target - timedelta(days=27)).isoformat()
@@ -424,6 +437,10 @@ def readiness(db, user_id: str = DEFAULT_USER_ID, date=None) -> dict:
         "sleepScore": sleep_score,
         "acuteChronicRatio": acute_chronic_ratio,
         "daysSinceHard": days_since_hard,
+        # P11 — respiration and Garmin readiness
+        "respirationDelta": resp_delta,
+        "garminReadinessScore": garmin_readiness,
+        "garminReadinessLevel": garmin_readiness_level,
         "flags": flags,
     }
 
