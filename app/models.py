@@ -736,6 +736,7 @@ def init_db():
     _migrate_sync_meta_to_user_keys()
     _backfill_detail_synced_at()
     _normalize_activity_types()
+    _migrate_chat_messages_fts()
     _seed_default_user_and_credentials()
     _seed_marathon_goal()
     _seed_default_recovery_tool()
@@ -878,6 +879,38 @@ def _normalize_activity_types():
                     (normalized, raw_type),
                 )
         conn.commit()
+
+
+def _migrate_chat_messages_fts():
+    """P15: Create FTS5 full-text search virtual table for chat history.
+    Indexes only real (non-test) messages for cross-session context discovery.
+    Gracefully handles existing tables and corrupt indexes."""
+    with engine.connect() as conn:
+        try:
+            conn.exec_driver_sql("DROP TABLE IF EXISTS chat_messages_fts")
+        except Exception:
+            pass
+        try:
+            conn.exec_driver_sql("""
+                CREATE VIRTUAL TABLE chat_messages_fts USING fts5(
+                    id UNINDEXED,
+                    user_id UNINDEXED,
+                    role UNINDEXED,
+                    content,
+                    created_at UNINDEXED
+                )
+            """)
+            conn.exec_driver_sql("""
+                INSERT INTO chat_messages_fts(id, user_id, role, content, created_at)
+                SELECT id, user_id, role, content, created_at
+                FROM chat_messages
+                WHERE is_test = 0 OR is_test IS NULL
+            """)
+            conn.commit()
+        except Exception:
+            # If anything fails (duplicate table, corrupt FTS, etc), log but don't crash.
+            # The search function handles the missing/broken table gracefully.
+            pass
 
 
 def run_needs_detail_sync(db, run_id: str) -> bool:

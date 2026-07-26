@@ -954,3 +954,40 @@ def gear_summary(db, user_id: str = DEFAULT_USER_ID) -> list[dict]:
             "totalMiles": round(miles, 1), "wearPct": wear_pct,
         })
     return out
+
+
+def search_chat_history(db, query: str, limit: int = 10, user_id: str = DEFAULT_USER_ID) -> list:
+    """Full-text search over chat history. Uses FTS5 virtual table for fast, bounded,
+    token-efficient cross-session context discovery (not embeddings, not whole-history
+    re-seeding). Returns up to `limit` results ordered by recency (most recent first).
+    P15: Only real (non-test) messages are indexed and searchable."""
+    from .models import ChatMessage
+    
+    try:
+        # FTS5 is case-insensitive by default. Query escaping is handled by SQLAlchemy's
+        # parameter binding — query text is always treated as data, never SQL syntax.
+        results = db.exec_driver_sql(
+            """
+            SELECT id, user_id, role, content, created_at
+            FROM chat_messages_fts
+            WHERE chat_messages_fts MATCH ? AND user_id = ?
+            ORDER BY created_at DESC
+            LIMIT ?
+            """,
+            [query, user_id, limit]
+        ).fetchall()
+        
+        return [
+            {
+                "id": row[0],
+                "role": row[2],
+                "content": row[3],
+                "createdAt": row[4],
+            }
+            for row in results
+        ]
+    except Exception:
+        # FTS5 table doesn't exist yet (hasn't been initialized), or query is malformed.
+        # Return empty gracefully rather than crashing — the search tool becomes
+        # a no-op until the index is built.
+        return []

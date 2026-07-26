@@ -50,6 +50,7 @@ _TOOL_NAMES = [
     "get_exercise_progress", "log_product_feedback",
     "render_chart", "get_goals",
     "get_recovery_tools", "recommend_recovery_session", "get_recovery_sessions",
+    "search_chat_history",
 ]
 ALLOWED_TOOL_NAMES = [f"mcp__runlog__{name}" for name in _TOOL_NAMES]
 
@@ -513,6 +514,18 @@ def _build_tools(user_id: str, is_test: bool = False) -> list:
         # ToolResultBlock from the SDK stream.
         return {"content": [{"type": "text", "text": json.dumps(args)}]}
 
+    @tool("search_chat_history", "Search chat history for relevant prior context from past conversations. Use natural language queries (e.g., 'shin injury', 'weight gain last month', 'compression boots') — returns up to 10 of the most recent matching messages, useful for cross-session continuity when the model needs context it wasn't given this turn.", {
+        "type": "object",
+        "properties": {
+            "query": {"type": "string", "description": "Natural language search query (e.g., 'shin injury', 'recovery session', 'pace trend')"},
+            "limit": {"type": "integer", "description": "Max results to return, default 10"},
+        },
+        "required": ["query"],
+    })
+    async def search_chat_history(args):
+        result = _db_call(stats.search_chat_history, args["query"], args.get("limit", 10), user_id=user_id)
+        return {"content": [{"type": "text", "text": json.dumps(result)}]}
+
     return [
         get_run_summary, get_weekly_mileage, get_monthly_mileage, get_personal_records,
         get_pace_trend, get_training_load_trend, get_readiness, get_daily_steps, query_runs, get_run_detail,
@@ -521,6 +534,7 @@ def _build_tools(user_id: str, is_test: bool = False) -> list:
         get_exercise_progress, log_product_feedback,
         render_chart, get_goals,
         get_recovery_tools, recommend_recovery_session, get_recovery_sessions,
+        search_chat_history,
     ]
 
 
