@@ -469,6 +469,117 @@ function buildSleepConfig(sleepData: WellnessDay[]): ChartConfiguration<"line"> 
   }
 }
 
+// P10 — respiration (waking/sleep averages; lowest/highest for range)
+function buildRespirationConfig(data: WellnessDay[]): ChartConfiguration<"line"> | null {
+  if (data.length < 2) return null
+  return {
+    type: "line",
+    data: {
+      labels: data.map((d) => d.date.slice(5)),
+      datasets: [
+        {
+          label: "Waking avg",
+          data: data.map((d) => d.avgWakingRespirationRate),
+          borderColor: CHART_COLORS.orange,
+          backgroundColor: CHART_COLORS.orange,
+          tension: 0.3,
+          spanGaps: true,
+        },
+        {
+          label: "Sleep avg",
+          data: data.map((d) => d.avgSleepRespirationRate),
+          borderColor: CHART_COLORS.cyan,
+          backgroundColor: CHART_COLORS.cyan,
+          tension: 0.3,
+          spanGaps: true,
+        },
+        {
+          label: "Lowest",
+          data: data.map((d) => d.lowestRespirationRate),
+          borderColor: CHART_COLORS.green,
+          backgroundColor: CHART_COLORS.green,
+          borderDash: [5, 5],
+          tension: 0.3,
+          spanGaps: true,
+        },
+        {
+          label: "Highest",
+          data: data.map((d) => d.highestRespirationRate),
+          borderColor: CHART_COLORS.gold,
+          backgroundColor: CHART_COLORS.gold,
+          borderDash: [5, 5],
+          tension: 0.3,
+          spanGaps: true,
+        },
+      ],
+    },
+    options: {
+      plugins: { legend: { display: true, labels: { boxWidth: 10 } }, zoom: CHART_PAN_ZOOM },
+      scales: { x: { grid: { display: false } }, y: { grid: { color: CHART_COLORS.grid } } },
+    },
+  }
+}
+
+// P10 — body battery (charged/drained daily)
+function buildBodyBatteryConfig(data: WellnessDay[]): ChartConfiguration<"bar"> | null {
+  if (data.length < 2) return null
+  return {
+    type: "bar",
+    data: {
+      labels: data.map((d) => d.date.slice(5)),
+      datasets: [
+        {
+          label: "Charged",
+          data: data.map((d) => d.bodyBatteryCharged),
+          backgroundColor: CHART_COLORS.green,
+        },
+        {
+          label: "Drained",
+          data: data.map((d) => d.bodyBatteryDrained),
+          backgroundColor: CHART_COLORS.orange,
+        },
+      ],
+    },
+    options: {
+      plugins: { legend: { display: true, labels: { boxWidth: 10 } }, zoom: CHART_PAN_ZOOM },
+      scales: { x: { grid: { display: false } }, y: { grid: { color: CHART_COLORS.grid } } },
+    },
+  }
+}
+
+// P10 — stress levels (average and maximum daily stress)
+function buildStressConfig(data: WellnessDay[]): ChartConfiguration<"line"> | null {
+  if (data.length < 2) return null
+  return {
+    type: "line",
+    data: {
+      labels: data.map((d) => d.date.slice(5)),
+      datasets: [
+        {
+          label: "Avg stress",
+          data: data.map((d) => d.avgStressLevel),
+          borderColor: CHART_COLORS.orange,
+          backgroundColor: CHART_COLORS.orange,
+          tension: 0.3,
+          spanGaps: true,
+        },
+        {
+          label: "Max stress",
+          data: data.map((d) => d.maxStressLevel),
+          borderColor: CHART_COLORS.gold,
+          backgroundColor: CHART_COLORS.gold,
+          tension: 0.3,
+          spanGaps: true,
+        },
+      ],
+    },
+    options: {
+      plugins: { legend: { display: true, labels: { boxWidth: 10 } }, zoom: CHART_PAN_ZOOM },
+      scales: { x: { grid: { display: false } }, y: { grid: { color: CHART_COLORS.grid } } },
+    },
+  }
+}
+
 // Runs a builder over one page's data, memoized per page independently — so
 // re-rendering because e.g. only the "next" page's query resolved doesn't
 // tear down and rebuild the already-stable "prev"/"current" Chart.js
@@ -500,6 +611,10 @@ const hasRacePrediction = (d: WellnessDay) =>
   d.racePredict5kSec != null || d.racePredict10kSec != null
   || d.racePredictHalfMarathonSec != null || d.racePredictMarathonSec != null
 const hasTrainingReadiness = (d: WellnessDay) => d.trainingReadinessScore != null
+// P10
+const hasRespiration = (d: WellnessDay) => d.avgWakingRespirationRate != null || d.avgSleepRespirationRate != null
+const hasBodyBattery = (d: WellnessDay) => d.bodyBatteryCharged != null || d.bodyBatteryDrained != null
+const hasStress = (d: WellnessDay) => d.avgStressLevel != null || d.maxStressLevel != null
 
 export function InsightsPage() {
   const queryClient = useQueryClient()
@@ -628,6 +743,16 @@ export function InsightsPage() {
   const currentReadiness = useFiltered(wellnessQuery.data, hasTrainingReadiness)
   const prevReadiness = useFiltered(prevWellnessQuery.data, hasTrainingReadiness)
   const nextReadiness = useFiltered(nextWellnessQuery.data, hasTrainingReadiness)
+  // P10
+  const currentRespiration = useFiltered(wellnessQuery.data, hasRespiration)
+  const prevRespiration = useFiltered(prevWellnessQuery.data, hasRespiration)
+  const nextRespiration = useFiltered(nextWellnessQuery.data, hasRespiration)
+  const currentBodyBattery = useFiltered(wellnessQuery.data, hasBodyBattery)
+  const prevBodyBattery = useFiltered(prevWellnessQuery.data, hasBodyBattery)
+  const nextBodyBattery = useFiltered(nextWellnessQuery.data, hasBodyBattery)
+  const currentStress = useFiltered(wellnessQuery.data, hasStress)
+  const prevStress = useFiltered(prevWellnessQuery.data, hasStress)
+  const nextStress = useFiltered(nextWellnessQuery.data, hasStress)
 
   const currentStepsData = useOrEmpty(stepsQuery.data)
   const prevStepsData = useOrEmpty(prevStepsQuery.data)
@@ -746,6 +871,10 @@ export function InsightsPage() {
   const sleep = usePagedConfigs(currentSleep, prevSleep, nextSleep, buildSleepConfig)
   const racePredictions = usePagedConfigs(currentRacePredictions, prevRacePredictions, nextRacePredictions, buildRacePredictionsConfig)
   const readiness = usePagedConfigs(currentReadiness, prevReadiness, nextReadiness, buildTrainingReadinessConfig)
+  // P10
+  const respiration = usePagedConfigs(currentRespiration, prevRespiration, nextRespiration, buildRespirationConfig)
+  const bodyBattery = usePagedConfigs(currentBodyBattery, prevBodyBattery, nextBodyBattery, buildBodyBatteryConfig)
+  const stress = usePagedConfigs(currentStress, prevStress, nextStress, buildStressConfig)
 
   if (!runsQuery.data) return <Skeleton className="h-64 w-full" />
 
@@ -935,6 +1064,57 @@ export function InsightsPage() {
                 prevConfig={readiness.prev}
                 config={readiness.current}
                 nextConfig={readiness.next}
+                height={140}
+                onPageShift={dragEnabled ? handlePageShift : undefined}
+                loading={wellnessQuery.isFetching}
+              />
+            )}
+          </ChartPanel>
+
+          <ChartPanel
+            title="Respiration"
+            sub="Waking and sleep averages, plus lowest/highest range (Garmin-only)"
+            empty={!respiration.current ? "No respiration data synced yet (Garmin-only)." : null}
+          >
+            {respiration.current && (
+              <ChartCarousel
+                prevConfig={respiration.prev}
+                config={respiration.current}
+                nextConfig={respiration.next}
+                height={160}
+                onPageShift={dragEnabled ? handlePageShift : undefined}
+                loading={wellnessQuery.isFetching}
+              />
+            )}
+          </ChartPanel>
+
+          <ChartPanel
+            title="Body Battery"
+            sub="Daily charged and drained (Garmin-only)"
+            empty={!bodyBattery.current ? "No body battery data synced yet (Garmin-only)." : null}
+          >
+            {bodyBattery.current && (
+              <ChartCarousel
+                prevConfig={bodyBattery.prev}
+                config={bodyBattery.current}
+                nextConfig={bodyBattery.next}
+                height={160}
+                onPageShift={dragEnabled ? handlePageShift : undefined}
+                loading={wellnessQuery.isFetching}
+              />
+            )}
+          </ChartPanel>
+
+          <ChartPanel
+            title="Daily Stress"
+            sub="Average and maximum stress levels (Garmin-only)"
+            empty={!stress.current ? "No stress data synced yet (Garmin-only)." : null}
+          >
+            {stress.current && (
+              <ChartCarousel
+                prevConfig={stress.prev}
+                config={stress.current}
+                nextConfig={stress.next}
                 height={140}
                 onPageShift={dragEnabled ? handlePageShift : undefined}
                 loading={wellnessQuery.isFetching}

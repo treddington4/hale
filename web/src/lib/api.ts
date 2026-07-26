@@ -94,6 +94,15 @@ export interface WellnessDay {
   racePredictMarathonSec: number | null
   trainingReadinessScore: number | null
   trainingReadinessLevel: string | null
+  // P10 — respiration, body battery, stress
+  avgWakingRespirationRate: number | null
+  avgSleepRespirationRate: number | null
+  lowestRespirationRate: number | null
+  highestRespirationRate: number | null
+  bodyBatteryCharged: number | null
+  bodyBatteryDrained: number | null
+  avgStressLevel: number | null
+  maxStressLevel: number | null
 }
 
 export interface DailyStepsPoint {

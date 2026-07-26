@@ -81,15 +81,21 @@ def get_wellness(days: int = 90, start: str = None, end: str = None, all_time: b
             "lightSleepSeconds": r.light_sleep_seconds,
             "remSleepSeconds": r.rem_sleep_seconds,
             "awakeSleepSeconds": r.awake_sleep_seconds,
-            # Phase 24.3/24.2 — first surfaced anywhere in the UI here (previously
-            # only fed into the Phase 27 daily coach report's prose). Same DailySteps
-            # rows this endpoint already queries, so this is additive-only.
             "racePredict5kSec": r.race_predict_5k_sec,
             "racePredict10kSec": r.race_predict_10k_sec,
             "racePredictHalfMarathonSec": r.race_predict_half_marathon_sec,
             "racePredictMarathonSec": r.race_predict_marathon_sec,
             "trainingReadinessScore": r.training_readiness_score,
             "trainingReadinessLevel": r.training_readiness_level,
+            # P10 — respiration, body battery, stress (Garmin-only)
+            "avgWakingRespirationRate": r.avg_waking_respiration_rate,
+            "avgSleepRespirationRate": r.avg_sleep_respiration_rate,
+            "lowestRespirationRate": r.lowest_respiration_rate,
+            "highestRespirationRate": r.highest_respiration_rate,
+            "bodyBatteryCharged": r.body_battery_charged,
+            "bodyBatteryDrained": r.body_battery_drained,
+            "avgStressLevel": r.avg_stress_level,
+            "maxStressLevel": r.max_stress_level,
         } for r in rows]
     finally:
         db.close()
