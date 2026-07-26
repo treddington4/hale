@@ -3393,14 +3393,175 @@ third source and never updated:
 
 ---
 
+## Phase 26 — "Ask coach about this activity" button — done
+
+New icon button on every `RunCard` (next to the existing edit pencil) jumps to
+Chat and asks the coach about that specific activity, with the reply reliably
+grounded on which run it is rather than left to prose inference.
+- [x] `assistant.py`'s `get_run_detail` tool's inline `_fetch` closure promoted
+      to `stats.run_detail(db, run_id, user_id=...)` — single computation core
+      per this repo's own discipline (CLAUDE.md); the tool is now a thin wrapper.
+- [x] New `coach.get_activity_context_block(db, activity_id, user_id)` —
+      same hidden-context-block pattern as `get_health_context_block`/
+      `get_recovery_tools_context_block`/`get_date_context_block`, prepended to
+      `client.query()` in `assistant.send_message` (never persisted to
+      `ChatMessage` history). Degrades to `""` for a missing/stale id, verified
+      live (a fabricated `activityId` produced a normal reply, no error).
+      `send_message`/`POST /api/chat/message` gained an optional `activity_id`/
+      `activityId` param end-to-end.
+- [x] Frontend: `RunCard`'s new `onAskCoach` prop, wired in `ActivitiesPage.tsx`
+      via `navigate("/chat", { state: { prefillActivityId, prefillText } })`.
+      `ChatPage.tsx` consumes `location.state` once on mount (`useRef` guard
+      against React 18 StrictMode's dev-only double-invoke), auto-fires
+      `handleSend`, then clears the state so back/forward nav doesn't replay it.
+      Gated on chat being configured.
+- [x] Verified live (via `X-Hale-Test: 1`, never touching real history): a real
+      run's id produced a reply citing that run's actual mile splits/HR/GAP —
+      zero tool calls made, confirming the hidden context worked directly
+      rather than the model needing to look the run up itself.
+- [x] `tsc -b`/`oxlint` clean. Commit.
+
+## Phase 27 — Homepage daily coach report — done
+
+A short trailing-7-day coach check-in on Home, generated at most once per
+calendar day (content scope is always "last 7 days," not a calendar week).
+- [x] `self_review.py`'s `_run_one_shot`/`_looks_like_real_content`/
+      `_SUSPICIOUS_REPLY_MARKERS` promoted to `coach/core.py` as public
+      `run_one_shot`/`looks_like_real_content`/`SUSPICIOUS_REPLY_MARKERS`, so
+      `daily_report.py`'s report generation reuses the exact same ephemeral-
+      client hardening instead of a second copy; `self_review.py`'s two call
+      sites updated accordingly.
+- [x] New `stats.wellness_trend(db, days=7, user_id=...)` — first surface
+      anywhere of the Phase 24 `DailySteps` columns (training readiness, ACWR,
+      race predictions, body battery, stress), doubling as the basis for the
+      VO2/race-prediction trend wanted earlier this session.
+- [x] New `coach/daily_report.py`: `_build_report_prompt` pre-fetches trailing-
+      7-day `run_summary`/`training_load_trend`/`readiness`/`wellness_trend`/
+      active goals (no tool access in the one-shot call, so everything needed
+      is fetched up front); `generate_report` builds a system prompt from
+      `BASE_PROMPT` + the user's actual persona tone + sex block (Phase 28) +
+      report-specific instructions, calls `core.run_one_shot`.
+- [x] New `GET /api/coach/daily-report` (`routes/chat.py`) mirrors
+      `routes/dashboard.py`'s existing cache-hit/cache-miss pattern exactly:
+      cache key `user_key(user_id, f"coach_report_{local_today(user_id)}")` via
+      `get_sync_meta`/`set_sync_meta`. Caches the negative case too (empty-
+      string sentinel) so an unconfigured/failed day doesn't retry the LLM call
+      on every subsequent page load that same day.
+- [x] Frontend: `useDailyCoachReport()` + `DailyCoachReportCard` (mounted on
+      Home right after the stat strip) — shows a skeleton while the first
+      request of the day is generating (a few seconds), degrades to nothing
+      once loaded if not configured/no report today, matching every other Home
+      card's silent-degrade convention otherwise.
+- [x] Verified live: real first call generated a report grounded in real
+      numbers, in the user's actual configured persona tone; second call
+      returned instantly (~90ms) from cache with identical content. (The exact
+      run count in that first live report was wrong — see Phase 27.1, found
+      from real usage.)
+- [x] Supersedes the separate "Daily AI insight card"/"Weekly coach report"
+      backlog ideas below (merged into one rolling-7-day, once-per-day design
+      per explicit direction this session) — see Cross-cutting section.
+- [x] `tsc -b`/`oxlint` clean. Commit.
+
+## Phase 27.1 — Two real bugs found from actual usage: wrong run count, and
+## request-path latency — done
+
+Direct user feedback after using Phase 27's report for real: "I ran 5 times
+over last 7 days" but the report said six; and the first Home load each day
+visibly stalled waiting on the LLM call.
+
+- **Wrong count — a genuine off-by-one date-range bug, not a model error.**
+  `daily_report._build_report_prompt` computed `start = end - timedelta(days=7)`
+  then queried `run_summary(start, end)` inclusive on both ends — that's an
+  **8-day** window (today plus 7 days back), not 7. Confirmed directly:
+  `run_summary` really did return `runCount: 6` for that window, and the model
+  was accurately reporting a wrong number handed to it, not hallucinating.
+  Recomputing with the correct trailing-7-day window (`timedelta(days=6)`)
+  gives `runCount: 5`, matching the user's real activity. Fixed in
+  `_build_report_prompt`; `stats.wellness_trend` (Phase 27, same trailing-N-
+  days shape) had the identical bug and was fixed the same way. The prompt
+  also now states the exact run count explicitly ("exactly N runs... state
+  this exact count, do not recount or approximate") as defense in depth against
+  the model re-deriving and misstating it again from the raw JSON.
+- **Request-path latency — reversed the earlier lazy-generate design after
+  real use showed the cost.** Phase 27 originally generated on the first Home
+  load of the day, synchronously, in the request path (a deliberate choice at
+  the time, confirmed with the user) — in practice this made that one load
+  stall for several seconds waiting on Claude. Fixed by moving generation
+  fully off the request path:
+  - New cron job (`main.py`, 04:45 `APP_TIMEZONE`, same pattern as the
+    existing 04:00/04:15/04:30 generator/PMC/self-review jobs) calls
+    `daily_report.run_for_all_users()`, pre-generating every non-demo user's
+    report before anyone loads Home.
+  - `GET /api/coach/daily-report` is now a **pure cache read** — never awaits
+    generation. On a cache miss (cron hasn't run yet today, e.g. a container
+    restart mid-night, or a brand-new user), it writes a `"generating"`
+    sentinel synchronously (cheap) and fires the actual generation via
+    FastAPI `BackgroundTasks` (runs after the response is sent, never blocks
+    the caller), returning `{report: null}` immediately either way. A later
+    request that same day picks up the cached result once the background task
+    finishes.
+  - New shared `daily_report.generate_and_cache(user_id)` is the one place
+    that writes the cache, used identically by both the cron job and the
+    background-task fallback.
+  - Response contract (`{report, date}`) unchanged — no frontend changes
+    needed.
+- [x] Verified live: forced a same-day cache clear to confirm the fresh
+      (post-fix) generation — response now correctly opens "Exactly 5 runs in
+      7 days..."; a request during generation returned `{report: null}` in
+      ~100ms (not multi-second); a request after the background task finished
+      returned the real report, also in ~100ms (cache hit).
+- [x] Python syntax-checked, live import-checked, `tsc -b` unaffected (no
+      frontend changes). Commit.
+
+## Phase 28 — Sex-aware weight-training flavor — done
+
+A coach "flavor" for weight-training advice tailored to women — confirmed
+directly with the user this is general/free evidence-based content, not based
+on any specific external guide, keyed off the `User.sex` field (already in the
+schema, previously unread anywhere — "nothing reads these yet").
+- [x] `build_system_prompt(personality, sex=None)` — appends new
+      `WOMENS_STRENGTH_PROMPT` when `sex == "female"`: progressive overload
+      builds strength/tone not "bulk" (countering a common inaccurate worry),
+      bone-density/osteoporosis-prevention benefit, general pelvic-floor-safe
+      progression awareness — framed as fitness-coaching context, not medical
+      advice, under `SAFETY_OVERRIDE_PROMPT`'s existing "not a diagnosis"
+      umbrella. Verified directly: present for `sex="female"`, absent for
+      `None`/`"male"`.
+- [x] `assistant._current_personality` → `_current_persona_inputs` (returns
+      both personality and sex from one `db.get(User, ...)` call);
+      `daily_report.py` passes sex through too for voice consistency.
+- [x] `routes/settings.py`'s `update_profile` now calls `assistant.reset_client`
+      when `sex` actually changes, mirroring `set_coach_personality`'s existing
+      identical pattern (sex is baked into the SDK client at construction time).
+- [x] Two new `STRENGTH_TEMPLATES` (`generator.py`): `womens_at_home`
+      (bodyweight/light-equipment, explicitly no HIIT/plyometric/cardio-
+      interval moves) and `womens_at_gym` (equipment-based variant) — reusing
+      the existing category vocab, no new progression logic.
+- [x] Sex-aware default extended to **both** paths per explicit direction:
+      new shared `_default_strength_template(db, user_id)` (womens_at_home for
+      a female user, full_body_ab otherwise) backs both
+      `_auto_pick_strength_template`'s fallback (Quick Generate, when no
+      override and no strong recent cardio volume — the cardio-linked
+      `runner_focus` branch is untouched) AND both training-config default-
+      construction points (`generator._get_training_config` and
+      `core.get_training_config`), so a female user who never touches Quick
+      Generate still gets the tailored template as her nightly rotation's
+      starting point.
+- [x] Frontend: `NewWorkoutDialog.tsx`'s template picker gained the two new
+      options.
+- [x] Verified live via a throwaway test user (created, checked, deleted —
+      never touched the real default user's row): female default resolves to
+      `womens_at_home` on both the nightly-rotation and Quick-Generate-fallback
+      paths; male default unaffected (`full_body_ab`).
+- [x] `tsc -b`/`oxlint` clean, Python syntax + live import check clean. Commit.
+
+---
+
 ## Cross-cutting features (slot in any time after the listed dependency)
 
-- [ ] **Daily AI insight card** (after 0.3): Sonnet one-shot (separate short-lived SDK
-      client, same persona prompt), cached per day in sync_meta, Home widget —
-      existing backlog item
-- [ ] **Weekly coach report** (after 6.2): Sonnet one-shot every Sunday evening —
-      week's load vs plan, readiness trend, next week rationale; persona-toned;
-      stored + surfaced on Home, push notification
+- [x] ~~**Daily AI insight card**~~ / ~~**Weekly coach report**~~ — superseded
+      by Phase 27's rolling trailing-7-day, once-per-calendar-day daily report
+      above (merges both ideas into one design, per explicit direction).
 - [ ] **Workout critique** (after 4.3): coach compares completed run vs prescription
       (existing `record_workout_completion` path) — existing backlog item
 - [ ] **Calendar view** (after 0.4): month grid, planned vs completed workouts +

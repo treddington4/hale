@@ -1,16 +1,17 @@
 import { useNavigate } from "react-router-dom"
 import { useDashboardSummary } from "@/hooks/useDashboardSummary"
-import { useAllRuns } from "@/hooks/useRuns"
+import { useAllRuns } from "@/hooks/useActivities"
 import { useGoals } from "@/hooks/useGoals"
 import { useWellness } from "@/hooks/useWellness"
-import { isRunActivity, isDistanceActivity, activityFamily, totalWeightLbLifted, ACTIVITY_VERBS } from "@/lib/runs"
-import { paceStr, timeStr, fmtPctChange, fmtSleepDuration, isPlausiblePace } from "@/lib/format"
+import { isRunActivity, isDistanceActivity, activityFamily, totalWeightLbLifted, ACTIVITY_VERBS } from "@/lib/activities"
+import { paceStr, timeStr, fmtPctChange, fmtSleepDuration, isPlausiblePace, racePaceStr, RACE_DISTANCE_MI } from "@/lib/format"
 import type { WellnessDay } from "@/lib/api"
 import { ChartCard, CardGrid } from "@/components/home/ChartCard"
 import { DashBar } from "@/components/home/DashBar"
 import { GoalCard } from "@/components/home/GoalCard"
 import { FitnessTrendCard } from "@/components/home/FitnessTrendCard"
 import { GearWearCard } from "@/components/home/GearWearCard"
+import { DailyCoachReportCard } from "@/components/home/DailyCoachReportCard"
 import { Skeleton } from "@/components/ui/skeleton"
 
 const WEEK_MS = 7 * 86400000
@@ -240,6 +241,59 @@ function WellnessCards() {
   )
 }
 
+// Garmin's most recent race-time predictions (Phase 24.3/29) — 30 days is plenty of
+// lookback since these update periodically but not every day, matching the "no data
+// yet -> degrade to nothing" convention every other optional Home card here uses.
+// All four distances come from the same sync'd row (Garmin returns them together),
+// so this walks back to one shared row rather than four independent
+// latestWellnessValue lookups, which could otherwise mix values from different days.
+function RacePredictionCard() {
+  const { data } = useWellness({ days: 30 })
+  const navigate = useNavigate()
+  if (!data) return null
+
+  let latest: WellnessDay | null = null
+  for (let i = data.length - 1; i >= 0; i--) {
+    if (data[i].racePredict5kSec != null) {
+      latest = data[i]
+      break
+    }
+  }
+  if (!latest) return null
+
+  return (
+    <div className="mt-6">
+      <h2 className="mb-3 text-sm font-semibold">Race Predictions</h2>
+      <CardGrid>
+        <ChartCard
+          label="5K"
+          value={timeStr(latest.racePredict5kSec)}
+          breakdown={`${racePaceStr(latest.racePredict5kSec, RACE_DISTANCE_MI["5k"])} · ${latest.date}`}
+          onClick={() => navigate("/insights")}
+        />
+        <ChartCard
+          label="10K"
+          value={timeStr(latest.racePredict10kSec)}
+          breakdown={`${racePaceStr(latest.racePredict10kSec, RACE_DISTANCE_MI["10k"])} · ${latest.date}`}
+          onClick={() => navigate("/insights")}
+        />
+        <ChartCard
+          label="Half Marathon"
+          value={timeStr(latest.racePredictHalfMarathonSec)}
+          breakdown={`${racePaceStr(latest.racePredictHalfMarathonSec, RACE_DISTANCE_MI.half)} · ${latest.date}`}
+          onClick={() => navigate("/insights")}
+        />
+        <ChartCard
+          label="Marathon"
+          value={timeStr(latest.racePredictMarathonSec)}
+          breakdown={`${racePaceStr(latest.racePredictMarathonSec, RACE_DISTANCE_MI.marathon)} · ${latest.date}`}
+          onClick={() => navigate("/insights")}
+        />
+      </CardGrid>
+    </div>
+  )
+}
+
 function GoalsSection() {
   const { data: goals } = useGoals()
   if (!goals) return <Skeleton className="h-24 w-full" />
@@ -284,6 +338,8 @@ export function HomePage() {
         {breakdown && <div className="text-muted-foreground mt-2 font-mono text-xs">{breakdown}</div>}
       </div>
 
+      <DailyCoachReportCard />
+
       <FitnessTrendCard />
 
       <div>
@@ -293,6 +349,7 @@ export function HomePage() {
 
       <DashboardCards />
       <WellnessCards />
+      <RacePredictionCard />
       <GearWearCard />
     </div>
   )

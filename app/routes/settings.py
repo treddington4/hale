@@ -219,15 +219,24 @@ async def update_profile(request: Request, user_id: str = Depends(auth.current_u
                 except ValueError:
                     raise HTTPException(400, "dateOfBirth must be YYYY-MM-DD or null")
             user.date_of_birth = v
+        sex_changed = False
         if "sex" in body:
             v = body["sex"]
             if v is not None and v not in _VALID_SEX:
                 raise HTTPException(400, f"sex must be one of {_VALID_SEX} or null")
+            sex_changed = user.sex != v
             user.sex = v
         db.commit()
-        return _profile_to_dict(user)
+        result = _profile_to_dict(user)
     finally:
         db.close()
+    if sex_changed:
+        # Sex is baked into the SDK's system prompt at client-construction time (Phase
+        # 28's WOMENS_STRENGTH_PROMPT), same as coach_personality — reset so the next
+        # chat message rebuilds it, mirroring set_coach_personality's identical pattern.
+        from ..coach import assistant
+        await assistant.reset_client(user_id)
+    return result
 
 
 # ---------- Geocoding (for the Map tab's location labels) ----------

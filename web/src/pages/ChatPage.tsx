@@ -1,4 +1,5 @@
-import { useMemo, useState } from "react"
+import { useEffect, useMemo, useRef, useState } from "react"
+import { useLocation, useNavigate } from "react-router-dom"
 import { useQueryClient } from "@tanstack/react-query"
 import { MessageCircle } from "lucide-react"
 import { api, type ChatMessage } from "@/lib/api"
@@ -24,10 +25,13 @@ export function ChatPage() {
   const historyQuery = useChatHistory()
   const personaQuery = useCoachPersonality()
   const qc = useQueryClient()
+  const location = useLocation()
+  const navigate = useNavigate()
 
   const [pendingUserText, setPendingUserText] = useState<string | null>(null)
   const [sending, setSending] = useState(false)
   const [historyExpanded, setHistoryExpanded] = useState(false)
+  const prefillFired = useRef(false)
 
   const allMessages = useMemo<DisplayMessage[]>(() => {
     const history = historyQuery.data ?? []
@@ -43,10 +47,10 @@ export function ChatPage() {
   const visible = shouldCollapse ? allMessages.slice(-CHAT_COLLAPSE_VISIBLE_COUNT) : allMessages
   const hiddenCount = allMessages.length - visible.length
 
-  async function handleSend(text: string) {
+  async function handleSend(text: string, activityId?: string) {
     setSending(true)
     setPendingUserText(text)
-    const result = await api.sendChatMessage(text)
+    const result = await api.sendChatMessage(text, activityId)
     const assistantContent = result.ok ? result.reply : result.kind === "http" ? `Error: ${result.message}` : result.message
     qc.setQueryData<ChatMessage[]>(["chatHistory"], (prev) => [
       ...(prev ?? []),
@@ -67,6 +71,21 @@ export function ChatPage() {
     qc.setQueryData<ChatMessage[]>(["chatHistory"], [])
     setHistoryExpanded(false)
   }
+
+  // Consumes router state set by ActivityCard's "ask coach" button (ActivitiesPage.tsx) —
+  // auto-fires the canned question once, then clears the state so back/forward
+  // navigation doesn't replay it. Gated on `configured` so this never fires into the
+  // "not configured" empty state. `prefillFired` guards against React 18 StrictMode's
+  // dev-only double-invoke of this effect sending the message twice.
+  useEffect(() => {
+    if (prefillFired.current || !statusQuery.data?.configured) return
+    const state = location.state as { prefillActivityId?: string; prefillText?: string } | null
+    if (!state?.prefillText) return
+    prefillFired.current = true
+    void handleSend(state.prefillText, state.prefillActivityId)
+    navigate(location.pathname, { replace: true, state: null })
+    // eslint-disable-next-line react-hooks/exhaustive-deps -- fire once when configured status lands
+  }, [statusQuery.data?.configured])
 
   const persona = personaQuery.data ? PERSONA_LABELS[personaQuery.data.personality] : null
 

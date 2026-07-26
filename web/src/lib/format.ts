@@ -18,6 +18,20 @@ export function timeStr(sec: number | null | undefined): string {
     : `${m}:${String(s).padStart(2, "0")}`
 }
 
+// Real race distances (miles) — for converting a total race-time prediction into an
+// equivalent min/mile pace, e.g. for the Home page's Race Predictions card.
+export const RACE_DISTANCE_MI = {
+  "5k": 3.10686,
+  "10k": 6.21371,
+  half: 13.10938,
+  marathon: 26.21875,
+} as const
+
+export function racePaceStr(raceTimeSec: number | null | undefined, distanceMi: number): string {
+  if (!raceTimeSec) return "--:--/mi"
+  return `${paceStr(raceTimeSec / distanceMi)}/mi`
+}
+
 export function fmtPctChange(pct: number | null | undefined): string {
   if (pct == null) return "--"
   return `${pct > 0 ? "+" : ""}${pct}%`

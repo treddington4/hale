@@ -5,7 +5,7 @@
 // exists — see api.geocode() for the (server-cached) reverse-geocoding used to
 // label a cluster's centroid.
 import { haversineKm } from "@/lib/route"
-import type { Run } from "@/lib/runs"
+import type { Run } from "@/lib/activities"
 
 const CLUSTER_RADIUS_KM = 50
 

@@ -3,8 +3,8 @@
 // grows tab-by-tab as each port needs more endpoints, it does not attempt to
 // cover the whole API up front.
 
-export type { Run } from "./runs"
-import type { Run } from "./runs"
+export type { Run } from "./activities"
+import type { Run } from "./activities"
 import { getDemoSession, clearDemoSession } from "./demoAuth"
 
 export interface HeaderStats {
@@ -88,6 +88,12 @@ export interface WellnessDay {
   lightSleepSeconds: number | null
   remSleepSeconds: number | null
   awakeSleepSeconds: number | null
+  racePredict5kSec: number | null
+  racePredict10kSec: number | null
+  racePredictHalfMarathonSec: number | null
+  racePredictMarathonSec: number | null
+  trainingReadinessScore: number | null
+  trainingReadinessLevel: string | null
 }
 
 export interface DailyStepsPoint {
@@ -712,14 +718,15 @@ export const api = {
 
   chatStatus: () => request<ChatStatus>("/api/chat/status"),
   coachPersonality: () => request<{ personality: CoachPersonality }>("/api/coach/personality"),
+  dailyCoachReport: () => request<{ report: string | null; date: string }>("/api/coach/daily-report"),
   chatHistory: () => request<ChatMessage[]>("/api/chat/history"),
   resetChat: () => request<{ status: string }>("/api/chat/reset", { method: "POST" }),
-  sendChatMessage: async (message: string): Promise<ChatSendResult> => {
+  sendChatMessage: async (message: string, activityId?: string): Promise<ChatSendResult> => {
     try {
       const res = await fetch("/api/chat/message", {
         method: "POST",
         headers: { "Content-Type": "application/json", ...demoAuthHeader() },
-        body: JSON.stringify({ message }),
+        body: JSON.stringify({ message, ...(activityId ? { activityId } : {}) }),
       })
       handleUnauthorized(res)
       const data = await res.json().catch(() => ({}))

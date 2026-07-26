@@ -1,7 +1,7 @@
 import * as React from "react"
-import { Timer, Heart, Footprints, Mountain, Zap, Gauge, Flame, Snowflake, Thermometer, Droplet, ChevronDown, ChevronUp, Pencil } from "lucide-react"
+import { Timer, Heart, Footprints, Mountain, Zap, Gauge, Flame, Snowflake, Thermometer, Droplet, ChevronDown, ChevronUp, Pencil, MessageCircle } from "lucide-react"
 import type { Run } from "@/lib/api"
-import { TYPE_COLORS } from "@/lib/runs"
+import { TYPE_COLORS, type RouteMetricPoint } from "@/lib/activities"
 import { withAlpha } from "@/lib/color"
 import { paceStr, timeStr, tempColor, isPlausiblePace } from "@/lib/format"
 import { gapSecPerMi, avgGapFromRoutePoints } from "@/lib/gap"
@@ -22,18 +22,20 @@ function MiniStat({ icon: Icon, children }: { icon: React.ComponentType<{ classN
   )
 }
 
-export function RunCard({
+export function ActivityCard({
   run,
   hrFloor,
   isOpen,
   onToggle,
   onEdit,
+  onAskCoach,
 }: {
   run: Run
   hrFloor: number
   isOpen: boolean
   onToggle: () => void
   onEdit: () => void
+  onAskCoach: () => void
 }) {
   const type = run.type || "Easy"
   const typeColor = TYPE_COLORS[type] || "#8B93A1"
@@ -60,7 +62,7 @@ export function RunCard({
     run.route && run.route.length > 1
       ? run.route
       : run.routeMetrics.length > 1
-        ? run.routeMetrics.map((p) => [p.lat, p.lon])
+        ? run.routeMetrics.map((p: RouteMetricPoint) => [p.lat, p.lon])
         : null
 
   return (
@@ -86,7 +88,7 @@ export function RunCard({
                 style={{ color: "#B98CE0", borderColor: withAlpha("#B98CE0", 0.33), background: withAlpha("#B98CE0", 0.09) }}
                 title={`Same run synced from both ${run.mergedSources.join(" and ")} — merged into one card`}
               >
-                🔗 {run.mergedSources.map((s) => s[0].toUpperCase() + s.slice(1)).join(" + ")}
+                🔗 {run.mergedSources.map((s: string) => s[0].toUpperCase() + s.slice(1)).join(" + ")}
               </span>
             )}
           </div>
@@ -170,17 +172,30 @@ export function RunCard({
       )}
 
       <div className="flex items-center justify-between">
-        <Button
-          variant="link"
-          size="sm"
-          className="h-auto gap-1 p-0"
-          onClick={(e) => {
-            e.stopPropagation()
-            onEdit()
-          }}
-        >
-          <Pencil className="size-3" /> edit
-        </Button>
+        <div className="flex items-center gap-3">
+          <Button
+            variant="link"
+            size="sm"
+            className="h-auto gap-1 p-0"
+            onClick={(e) => {
+              e.stopPropagation()
+              onEdit()
+            }}
+          >
+            <Pencil className="size-3" /> edit
+          </Button>
+          <Button
+            variant="link"
+            size="sm"
+            className="h-auto gap-1 p-0"
+            onClick={(e) => {
+              e.stopPropagation()
+              onAskCoach()
+            }}
+          >
+            <MessageCircle className="size-3" /> ask coach
+          </Button>
+        </div>
         <button onClick={onToggle} className="text-muted-foreground">
           {isOpen ? <ChevronUp className="size-4" /> : <ChevronDown className="size-4" />}
         </button>

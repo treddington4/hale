@@ -1,13 +1,13 @@
 import { useCallback, useEffect, useMemo, useRef, useState } from "react"
 import { useQueryClient } from "@tanstack/react-query"
 import type { ChartConfiguration } from "chart.js"
-import { useRuns, useAllRuns } from "@/hooks/useRuns"
+import { useActivities, useAllRuns } from "@/hooks/useActivities"
 import { useWellness, useMetrics } from "@/hooks/useWellness"
 import { useSteps } from "@/hooks/useSteps"
 import { useSleepStages } from "@/hooks/useSleepStages"
 import { useHrFloor, isPlausibleHR } from "@/hooks/useHrFloor"
-import { isPlausiblePace, paceStr } from "@/lib/format"
-import { isRunActivity, type Run } from "@/lib/runs"
+import { isPlausiblePace, paceStr, timeStr } from "@/lib/format"
+import { isRunActivity, type Run } from "@/lib/activities"
 import { currentFilterRange, toDateInputValue, todayMidnight, addDays, type FilterMode } from "@/lib/dates"
 import { FilterBar, type FilterState } from "@/components/activities/FilterBar"
 import type { RunsQuery, WellnessDay, DailyStepsPoint, DailyMetricPoint } from "@/lib/api"
@@ -323,6 +323,114 @@ function buildVo2Config(vo2Data: WellnessDay[]): ChartConfiguration<"line"> | nu
   }
 }
 
+// Phase 24.3/29 — Garmin's own race-time predictions, never charted anywhere
+// before (only fed into the daily coach report's prose). Updates periodically,
+// not every day (same "stepped" treatment as VO2 max above). 5K/10K read on the
+// left axis, Half/Full on the right — plotting all four on one shared axis
+// would squash the 5K line to nothing next to a ~4hr marathon prediction.
+function buildRacePredictionsConfig(data: WellnessDay[]): ChartConfiguration<"line"> | null {
+  if (data.length < 2) return null
+  const toMin = (sec: number | null) => (sec != null ? sec / 60 : null)
+  return {
+    type: "line",
+    data: {
+      labels: data.map((d) => d.date.slice(5)),
+      datasets: [
+        {
+          label: "5K",
+          data: data.map((d) => toMin(d.racePredict5kSec)),
+          borderColor: CHART_COLORS.gold,
+          backgroundColor: CHART_COLORS.gold,
+          yAxisID: "short",
+          tension: 0.3,
+          stepped: true,
+          spanGaps: true,
+        },
+        {
+          label: "10K",
+          data: data.map((d) => toMin(d.racePredict10kSec)),
+          borderColor: CHART_COLORS.cyan,
+          backgroundColor: CHART_COLORS.cyan,
+          yAxisID: "short",
+          tension: 0.3,
+          stepped: true,
+          spanGaps: true,
+        },
+        {
+          label: "Half Marathon",
+          data: data.map((d) => toMin(d.racePredictHalfMarathonSec)),
+          borderColor: CHART_COLORS.orange,
+          backgroundColor: CHART_COLORS.orange,
+          yAxisID: "long",
+          tension: 0.3,
+          stepped: true,
+          spanGaps: true,
+        },
+        {
+          label: "Marathon",
+          data: data.map((d) => toMin(d.racePredictMarathonSec)),
+          borderColor: CHART_COLORS.green,
+          backgroundColor: CHART_COLORS.green,
+          yAxisID: "long",
+          tension: 0.3,
+          stepped: true,
+          spanGaps: true,
+        },
+      ],
+    },
+    options: {
+      plugins: {
+        legend: { display: true, position: "top", labels: { boxHeight: 8 } },
+        tooltip: { callbacks: { label: (ctx) => `${ctx.dataset.label}: ${timeStr(Math.round((ctx.parsed.y as number) * 60))}` } },
+        zoom: CHART_PAN_ZOOM,
+      },
+      scales: {
+        short: {
+          type: "linear", position: "left",
+          ticks: { callback: (v) => timeStr(Number(v) * 60) },
+          title: { display: true, text: "5K / 10K", font: { size: 10 } },
+          grid: { color: CHART_COLORS.grid },
+        },
+        long: {
+          type: "linear", position: "right",
+          ticks: { callback: (v) => timeStr(Number(v) * 60) },
+          title: { display: true, text: "Half / Full", font: { size: 10 } },
+          grid: { display: false },
+        },
+        x: { grid: { display: false } },
+      },
+    },
+  }
+}
+
+function buildTrainingReadinessConfig(data: WellnessDay[]): ChartConfiguration<"line"> | null {
+  if (data.length < 2) return null
+  return {
+    type: "line",
+    data: {
+      labels: data.map((d) => d.date.slice(5)),
+      datasets: [{
+        data: data.map((d) => d.trainingReadinessScore),
+        borderColor: CHART_COLORS.green,
+        backgroundColor: CHART_COLORS.green,
+        tension: 0.3,
+        spanGaps: true,
+      }],
+    },
+    options: {
+      plugins: {
+        legend: { display: false },
+        tooltip: { callbacks: { label: (ctx) => `${ctx.parsed.y} — ${data[ctx.dataIndex]?.trainingReadinessLevel ?? ""}` } },
+        zoom: CHART_PAN_ZOOM,
+      },
+      scales: {
+        x: { grid: { display: false } },
+        y: { min: 0, max: 100, grid: { color: CHART_COLORS.grid } },
+      },
+    },
+  }
+}
+
 function buildSleepConfig(sleepData: WellnessDay[]): ChartConfiguration<"line"> | null {
   if (sleepData.length < 2) return null
   return {
@@ -388,6 +496,10 @@ function useOrEmpty<T>(data: T[] | undefined): T[] {
 const hasRestingHr = (d: WellnessDay) => d.restingHrBpm != null
 const hasVo2Max = (d: WellnessDay) => d.vo2max != null
 const hasSleepData = (d: WellnessDay) => d.sleepScore != null || d.sleepSeconds != null
+const hasRacePrediction = (d: WellnessDay) =>
+  d.racePredict5kSec != null || d.racePredict10kSec != null
+  || d.racePredictHalfMarathonSec != null || d.racePredictMarathonSec != null
+const hasTrainingReadiness = (d: WellnessDay) => d.trainingReadinessScore != null
 
 export function InsightsPage() {
   const queryClient = useQueryClient()
@@ -432,9 +544,9 @@ export function InsightsPage() {
     setFilter((f) => ({ ...f, anchor: shifted > today ? today : shifted }))
   }
 
-  const runsQuery = useRuns(rangeQuery)
-  const prevRunsQuery = useRuns(prevRangeQuery ?? {}, !!prevRangeQuery)
-  const nextRunsQuery = useRuns(nextRangeQuery ?? {}, !!nextRangeQuery)
+  const runsQuery = useActivities(rangeQuery)
+  const prevRunsQuery = useActivities(prevRangeQuery ?? {}, !!prevRangeQuery)
+  const nextRunsQuery = useActivities(nextRangeQuery ?? {}, !!nextRangeQuery)
   const allRunsQuery = useAllRuns()
   const metricsQuery = useMetrics(rangeQuery)
   const prevMetricsQuery = useMetrics(prevRangeQuery ?? {}, !!prevRangeQuery)
@@ -510,6 +622,12 @@ export function InsightsPage() {
   const currentSleep = useFiltered(wellnessQuery.data, hasSleepData)
   const prevSleep = useFiltered(prevWellnessQuery.data, hasSleepData)
   const nextSleep = useFiltered(nextWellnessQuery.data, hasSleepData)
+  const currentRacePredictions = useFiltered(wellnessQuery.data, hasRacePrediction)
+  const prevRacePredictions = useFiltered(prevWellnessQuery.data, hasRacePrediction)
+  const nextRacePredictions = useFiltered(nextWellnessQuery.data, hasRacePrediction)
+  const currentReadiness = useFiltered(wellnessQuery.data, hasTrainingReadiness)
+  const prevReadiness = useFiltered(prevWellnessQuery.data, hasTrainingReadiness)
+  const nextReadiness = useFiltered(nextWellnessQuery.data, hasTrainingReadiness)
 
   const currentStepsData = useOrEmpty(stepsQuery.data)
   const prevStepsData = useOrEmpty(prevStepsQuery.data)
@@ -626,6 +744,8 @@ export function InsightsPage() {
   const rhr = usePagedConfigs(currentRhr, prevRhr, nextRhr, buildRhrConfig)
   const vo2 = usePagedConfigs(currentVo2, prevVo2, nextVo2, buildVo2Config)
   const sleep = usePagedConfigs(currentSleep, prevSleep, nextSleep, buildSleepConfig)
+  const racePredictions = usePagedConfigs(currentRacePredictions, prevRacePredictions, nextRacePredictions, buildRacePredictionsConfig)
+  const readiness = usePagedConfigs(currentReadiness, prevReadiness, nextReadiness, buildTrainingReadinessConfig)
 
   if (!runsQuery.data) return <Skeleton className="h-64 w-full" />
 
@@ -781,6 +901,40 @@ export function InsightsPage() {
                 prevConfig={vo2.prev}
                 config={vo2.current}
                 nextConfig={vo2.next}
+                height={140}
+                onPageShift={dragEnabled ? handlePageShift : undefined}
+                loading={wellnessQuery.isFetching}
+              />
+            )}
+          </ChartPanel>
+
+          <ChartPanel
+            title="Race Predictions"
+            sub="Garmin's projected 5K/10K/half/full times — updates periodically, not every day"
+            empty={!racePredictions.current ? "No race prediction data synced yet (Garmin-only)." : null}
+          >
+            {racePredictions.current && (
+              <ChartCarousel
+                prevConfig={racePredictions.prev}
+                config={racePredictions.current}
+                nextConfig={racePredictions.next}
+                height={200}
+                onPageShift={dragEnabled ? handlePageShift : undefined}
+                loading={wellnessQuery.isFetching}
+              />
+            )}
+          </ChartPanel>
+
+          <ChartPanel
+            title="Training Readiness"
+            sub="Garmin's own daily composite readiness score (0-100) — a cross-check against this app's own readiness flags"
+            empty={!readiness.current ? "No training readiness data synced yet (Garmin-only)." : null}
+          >
+            {readiness.current && (
+              <ChartCarousel
+                prevConfig={readiness.prev}
+                config={readiness.current}
+                nextConfig={readiness.next}
                 height={140}
                 onPageShift={dragEnabled ? handlePageShift : undefined}
                 loading={wellnessQuery.isFetching}

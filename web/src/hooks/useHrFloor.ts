@@ -1,7 +1,7 @@
 import { useQuery } from "@tanstack/react-query"
 import { api } from "@/lib/api"
-import { useAllRuns } from "./useRuns"
-import { isRunActivity } from "@/lib/runs"
+import { useAllRuns } from "./useActivities"
+import { isRunActivity } from "@/lib/activities"
 
 const ABSOLUTE_MIN_HR = 20
 const FALLBACK_HR_FLOOR = 30

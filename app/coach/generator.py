@@ -53,7 +53,7 @@ def _get_training_config(db, user_id) -> UserTrainingConfig:
     config = db.get(UserTrainingConfig, user_id)
     return config or UserTrainingConfig(
         user_id=user_id, weekly_ramp_pct=3.0, mesocycle_pattern="3:1", distribution="pyramidal",
-        strength_days_per_week=2, strength_template="full_body_ab",
+        strength_days_per_week=2, strength_template=_default_strength_template(db, user_id),
     )
 
 
@@ -471,6 +471,45 @@ STRENGTH_TEMPLATES = {
             {"exercise": "Back Extension", "targetType": "reps", "category": "hinge"},
         ],
     },
+    # Phase 28 — general, free/no-equipment-required strength content for women
+    # (confirmed with the user: general evidence-based scope, not based on any
+    # specific external guide/document). Explicitly no HIIT/plyometric/cardio-
+    # interval moves — straightforward progressive-overload strength work, reusing
+    # the exact same category vocab as every other template above (no new
+    # progression logic needed).
+    "womens_at_home": {
+        "A": [
+            {"exercise": "Bodyweight Squat", "targetType": "reps", "category": "squat"},
+            {"exercise": "Incline Push-up", "targetType": "reps", "category": "push"},
+            {"exercise": "Resistance Band Row", "targetType": "reps", "category": "pull"},
+            {"exercise": "Glute Bridge", "targetType": "reps", "category": "hinge"},
+            {"exercise": "Dead Bug", "targetType": "reps", "category": "core"},
+        ],
+        "B": [
+            {"exercise": "Reverse Lunge", "targetType": "reps", "category": "squat"},
+            {"exercise": "Single-leg Glute Bridge", "targetType": "reps", "category": "hinge"},
+            {"exercise": "Resistance Band Pull-apart", "targetType": "reps", "category": "pull"},
+            {"exercise": "Plank", "targetType": "hold_sec", "category": "core"},
+            {"exercise": "Wall Push-up", "targetType": "reps", "category": "push"},
+        ],
+    },
+    # Phase 28 — equipment-based variant of the same focus above, for a gym setting.
+    "womens_at_gym": {
+        "A": [
+            {"exercise": "Goblet Squat", "targetType": "reps", "category": "squat"},
+            {"exercise": "Lat Pulldown", "targetType": "reps", "category": "pull"},
+            {"exercise": "Romanian Deadlift", "targetType": "reps", "category": "hinge"},
+            {"exercise": "Cable Chest Press", "targetType": "reps", "category": "push"},
+            {"exercise": "Side Plank", "targetType": "hold_sec", "category": "core"},
+        ],
+        "B": [
+            {"exercise": "Leg Press", "targetType": "reps", "category": "squat"},
+            {"exercise": "Seated Cable Row", "targetType": "reps", "category": "pull"},
+            {"exercise": "Hip Thrust", "targetType": "reps", "category": "hinge"},
+            {"exercise": "Dumbbell Overhead Press", "targetType": "reps", "category": "push"},
+            {"exercise": "Dead Bug", "targetType": "reps", "category": "core"},
+        ],
+    },
 }
 # Weeks of trailing Run/Ride mileage checked before auto-picking runner_focus over
 # full_body_ab as the quick-generate default (see run_quick_generate) — a real
@@ -507,17 +546,30 @@ def _build_exercise_step(ex: dict, progress: dict, light: bool) -> dict:
     return {"stepType": "strength_exercise", "exercise": ex["exercise"], "restSeconds": rest_seconds, "sets": sets}
 
 
+def _default_strength_template(db, user_id) -> str:
+    """Phase 28 — the generic (non-cardio-linked) strength-template default, shared
+    by _auto_pick_strength_template below and both training-config default-
+    construction points (this module's _get_training_config and core.py's
+    get_training_config) so a female user gets the tailored template as her
+    starting point everywhere, not just one path."""
+    user = db.get(User, user_id)
+    return "womens_at_home" if user and user.sex == "female" else "full_body_ab"
+
+
 def _auto_pick_strength_template(db, user_id, date) -> str:
     """Phase 14 — quick-generate default when the user hasn't explicitly chosen a
     target: complement real recent cardio training (runner_focus) rather than
-    always defaulting to the generic full-body rotation. Checked against a real
-    trailing-weeks lookback, not just one lucky week, to avoid flip-flopping."""
+    always defaulting to the generic default. Checked against a real trailing-weeks
+    lookback, not just one lucky week, to avoid flip-flopping. The cardio-volume-
+    linked runner_focus branch is activity-based and unaffected by Phase 28's
+    sex-aware fallback below (which only changes what "no strong cardio habit"
+    falls through to)."""
     week_start = _week_start(date)
     total = 0.0
     for i in range(STRENGTH_AUTO_TARGET_LOOKBACK_WEEKS):
         wk_start = week_start - timedelta(days=7 * i)
         total += _week_mileage(db, user_id, wk_start, "Run") + _week_mileage(db, user_id, wk_start, "Ride")
-    return "runner_focus" if total >= STRENGTH_AUTO_TARGET_MIN_MILES else "full_body_ab"
+    return "runner_focus" if total >= STRENGTH_AUTO_TARGET_MIN_MILES else _default_strength_template(db, user_id)
 
 
 def _generate_strength(db, user_id, date, readiness_result, config, template_override: str = None,

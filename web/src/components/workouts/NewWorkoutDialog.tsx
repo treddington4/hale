@@ -14,6 +14,8 @@ const STRENGTH_TEMPLATES: { key: string | null; label: string }[] = [
   { key: "full_body_ab", label: "Full Body" },
   { key: "runner_focus", label: "Runner Focus" },
   { key: "back_and_legs", label: "Back & Legs" },
+  { key: "womens_at_home", label: "Women's — At Home" },
+  { key: "womens_at_gym", label: "Women's — At Gym" },
 ]
 
 const TYPE_BUTTONS: { domain: QuickGenerateDomain; label: string; icon: typeof Footprints }[] = [

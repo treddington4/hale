@@ -1,4 +1,4 @@
-import type { ExerciseSet } from "@/lib/runs"
+import type { ExerciseSet } from "@/lib/activities"
 import { timeStr } from "@/lib/format"
 
 // Groups consecutive same-exercise sets under one running set-number (set 1, 2,

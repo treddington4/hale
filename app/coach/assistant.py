@@ -32,7 +32,7 @@ from claude_agent_sdk import (
 
 from . import core as coach
 from .. import stats
-from ..models import SessionLocal, Run, ChatMessage, User, DEFAULT_USER_ID, owned_by
+from ..models import SessionLocal, ChatMessage, User, DEFAULT_USER_ID
 
 BUILTIN_TOOLS_BLOCKLIST = [
     "Bash", "Read", "Write", "Edit", "NotebookEdit", "Task", "WebFetch", "WebSearch",
@@ -176,22 +176,7 @@ def _build_tools(user_id: str, is_test: bool = False) -> list:
         "required": ["runId"],
     })
     async def get_run_detail(args):
-        def _fetch(db, run_id):
-            r = db.query(Run).filter(Run.id == run_id, owned_by(Run.user_id, user_id)).first()
-            if not r:
-                return None
-            hr_floor = stats.get_hr_floor(db, user_id)
-            return {
-                "id": r.id, "date": r.date, "name": r.name, "activityType": r.activity_type,
-                "distanceMi": r.distance_mi, "movingTimeSec": r.moving_time_sec,
-                "paceSecPerMi": r.avg_pace_sec_per_mi if stats.is_plausible_pace(r.avg_pace_sec_per_mi, r.distance_mi) else None,
-                "avgHR": r.avg_hr if stats.is_plausible_hr(r.avg_hr, hr_floor) else None,
-                "maxHR": r.max_hr if stats.is_plausible_hr(r.max_hr, hr_floor) else None,
-                "elevGainFt": r.elev_gain_ft, "avgCadence": r.avg_cadence,
-                "type": r.type_override or r.suggested_type, "rpe": r.rpe, "notes": r.notes,
-                "splits": json.loads(r.splits_json or "[]"),
-            }
-        result = _db_call(_fetch, args["runId"])
+        result = _db_call(stats.run_detail, args["runId"], user_id=user_id)
         if result is None:
             return {"content": [{"type": "text", "text": f"No run found with id {args['runId']}"}], "is_error": True}
         return {"content": [{"type": "text", "text": json.dumps(result)}]}
@@ -529,11 +514,13 @@ def is_configured() -> bool:
     return bool(os.environ.get("CLAUDE_CODE_OAUTH_TOKEN") or os.environ.get("ANTHROPIC_API_KEY"))
 
 
-def _current_personality(user_id: str = DEFAULT_USER_ID) -> str:
+def _current_persona_inputs(user_id: str = DEFAULT_USER_ID) -> tuple[str, str | None]:
+    """Both build_system_prompt inputs (personality, sex) in one DB round-trip —
+    Phase 28 folded sex in here rather than a second db.get(User, ...) call."""
     db = SessionLocal()
     try:
         user = db.get(User, user_id)
-        return (user.coach_personality if user else None) or "normal"
+        return ((user.coach_personality if user else None) or "normal", user.sex if user else None)
     finally:
         db.close()
 
@@ -562,7 +549,7 @@ async def _get_client(user_id: str = DEFAULT_USER_ID, is_test: bool = False) -> 
             mcp_servers={"runlog": server},
             allowed_tools=ALLOWED_TOOL_NAMES,
             disallowed_tools=BUILTIN_TOOLS_BLOCKLIST,
-            system_prompt=coach.build_system_prompt(_current_personality(user_id)),
+            system_prompt=coach.build_system_prompt(*_current_persona_inputs(user_id)),
             permission_mode="bypassPermissions",  # headless container, no TTY to prompt for approval
             setting_sources=[],  # don't inherit any local .claude/settings.json in the container
             max_turns=8,
@@ -599,12 +586,16 @@ def _persist(role: str, content: str, tool_calls=None, charts=None, user_id: str
         db.close()
 
 
-async def send_message(user_text: str, user_id: str = DEFAULT_USER_ID, is_test: bool = False) -> dict:
+async def send_message(user_text: str, user_id: str = DEFAULT_USER_ID, is_test: bool = False,
+                        activity_id: str | None = None) -> dict:
     """Non-streaming: blocks for the full response, persists both sides, returns
     {reply, toolCalls}. toolCalls records which real queries backed the answer, for
     UI transparency — directly serving the "grounded, not hallucinated" requirement.
     `is_test` (Phase 12.1) is set from the X-Hale-Test header on the incoming request —
-    routes/chat.py is the only caller that ever passes it True."""
+    routes/chat.py is the only caller that ever passes it True. `activity_id` (Phase 26)
+    is set only when the message originated from an activity card's "Ask coach" button —
+    it grounds the reply on that specific run via a hidden context block, same mechanism
+    as health/recovery context below."""
     if not is_configured():
         raise RuntimeError("AI assistant not configured — set CLAUDE_CODE_OAUTH_TOKEN or ANTHROPIC_API_KEY")
 
@@ -615,11 +606,13 @@ async def send_message(user_text: str, user_id: str = DEFAULT_USER_ID, is_test: 
     try:
         health_context = coach.get_health_context_block(db, user_id)
         recovery_context = coach.get_recovery_tools_context_block(db, user_id)
+        activity_context = coach.get_activity_context_block(db, activity_id, user_id)
     finally:
         db.close()
 
     client = await _get_client(user_id, is_test)
-    await client.query(coach.get_date_context_block(user_id) + health_context + recovery_context + user_text)
+    await client.query(coach.get_date_context_block(user_id) + health_context + recovery_context
+                        + activity_context + user_text)
 
     reply_text = ""
     tool_calls = []

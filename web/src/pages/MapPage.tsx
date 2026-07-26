@@ -1,6 +1,6 @@
 import { useEffect, useMemo, useRef, useState } from "react"
 import L from "leaflet"
-import { useAllRuns } from "@/hooks/useRuns"
+import { useAllRuns } from "@/hooks/useActivities"
 import { useHrFloor, isPlausibleHR } from "@/hooks/useHrFloor"
 import { api } from "@/lib/api"
 import { clusterRuns, clusterCentroid, type MapItem } from "@/lib/mapClusters"

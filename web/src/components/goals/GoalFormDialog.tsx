@@ -1,6 +1,6 @@
 import { useEffect, useMemo, useState } from "react"
 import type { Goal, GoalInput, GoalType } from "@/lib/api"
-import { useAllRuns } from "@/hooks/useRuns"
+import { useAllRuns } from "@/hooks/useActivities"
 import { Dialog, DialogContent, DialogHeader, DialogTitle } from "@/components/ui/dialog"
 import { Label } from "@/components/ui/label"
 import { Input } from "@/components/ui/input"

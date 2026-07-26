@@ -1,4 +1,4 @@
-import type { IntervalRep, RecoveryRep } from "@/lib/runs"
+import type { IntervalRep, RecoveryRep } from "@/lib/activities"
 import { paceStr } from "@/lib/format"
 import { isPlausibleHR } from "@/hooks/useHrFloor"
 

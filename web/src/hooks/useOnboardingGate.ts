@@ -2,7 +2,7 @@ import { useEffect } from "react"
 import { useNavigate, useLocation } from "react-router-dom"
 import { useStravaStatus, useGarminStatus } from "@/hooks/useSettings"
 import { useGoals } from "@/hooks/useGoals"
-import { useAllRuns } from "@/hooks/useRuns"
+import { useAllRuns } from "@/hooks/useActivities"
 
 // Redirects to /onboarding only for a genuinely fresh account — no Strava connected,
 // no Garmin configured, zero goals, zero runs ever synced. Deliberately conservative:

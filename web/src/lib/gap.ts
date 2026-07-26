@@ -21,7 +21,7 @@ export function gapSecPerMi(
   return pace / (minettiCost(grade) / minettiCost(0))
 }
 
-// Whole-run GAP from real per-point route data (RunCard's overall badge) — a
+// Whole-run GAP from real per-point route data (ActivityCard's overall badge) — a
 // meaningfully more accurate alternative to gapSecPerMi() above, which infers
 // one average "grade" for the entire run from total elevation *gain* divided
 // by distance. That's a gain-only proxy with no descent subtracted, so any

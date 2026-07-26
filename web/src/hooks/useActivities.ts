@@ -1,11 +1,11 @@
 import { useQuery, keepPreviousData } from "@tanstack/react-query"
 import { api, type RunsQuery } from "@/lib/api"
-import { mergeDuplicateRuns } from "@/lib/runs"
+import { mergeDuplicateRuns } from "@/lib/activities"
 
 // Phase 0.5 windowed /api/runs (see main.py get_runs) — defaults to the last 90
 // days server-side; pass `all: true` for true all-time totals. Result is merged
 // client-side the same way regardless of range (see lib/runs.ts).
-export function useRuns(query: RunsQuery = {}, enabled = true) {
+export function useActivities(query: RunsQuery = {}, enabled = true) {
   return useQuery({
     queryKey: ["runs", query],
     queryFn: () => api.runs(query),
@@ -25,5 +25,5 @@ export function useRuns(query: RunsQuery = {}, enabled = true) {
 // would silently understate them. Kept as its own hook (rather than a default
 // argument) so every call site states its intent explicitly.
 export function useAllRuns() {
-  return useRuns({ all: true })
+  return useActivities({ all: true })
 }

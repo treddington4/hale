@@ -1,12 +1,12 @@
 import { useEffect, useMemo, useState } from "react"
-import { useSearchParams } from "react-router-dom"
-import { useRuns } from "@/hooks/useRuns"
+import { useSearchParams, useNavigate } from "react-router-dom"
+import { useActivities } from "@/hooks/useActivities"
 import { useHrFloor } from "@/hooks/useHrFloor"
 import { useMutation, useQueryClient } from "@tanstack/react-query"
 import { api, type Run, type RunUpdate } from "@/lib/api"
 import { currentFilterRange, toDateInputValue, todayMidnight, addDays, type FilterMode } from "@/lib/dates"
 import { FilterBar, type FilterState } from "@/components/activities/FilterBar"
-import { RunCard } from "@/components/activities/RunCard"
+import { ActivityCard } from "@/components/activities/ActivityCard"
 import { EditRunDialog } from "@/components/activities/EditRunDialog"
 import { EmptyState } from "@/components/ui/empty-state"
 import { Skeleton } from "@/components/ui/skeleton"
@@ -22,6 +22,7 @@ function useUpdateRun() {
 
 export function ActivitiesPage() {
   const [searchParams] = useSearchParams()
+  const navigate = useNavigate()
 
   const [filter, setFilter] = useState<FilterState>(() => {
     const initialMode = (searchParams.get("filter") as FilterMode | null) ?? "rolling7"
@@ -38,7 +39,7 @@ export function ActivitiesPage() {
   const [editingRun, setEditingRun] = useState<Run | null>(null)
 
   const { start, end } = currentFilterRange(filter.mode, filter.anchor, filter.customStart, filter.customEnd)
-  const runsQuery = useRuns(
+  const runsQuery = useActivities(
     filter.mode === "all" ? { all: true } : { start: toDateInputValue(start), end: toDateInputValue(end) },
   )
   const hrFloor = useHrFloor()
@@ -81,13 +82,21 @@ export function ActivitiesPage() {
       ) : (
         <div className="flex flex-col gap-3">
           {filteredRuns.map((run) => (
-            <RunCard
+            <ActivityCard
               key={run.id}
               run={run}
               hrFloor={hrFloor}
               isOpen={expandedId === run.id}
               onToggle={() => setExpandedId(expandedId === run.id ? null : run.id)}
               onEdit={() => setEditingRun(run)}
+              onAskCoach={() =>
+                navigate("/chat", {
+                  state: {
+                    prefillActivityId: run.id,
+                    prefillText: `Tell me about my ${run.name || run.activityType || "activity"} on ${run.date}.`,
+                  },
+                })
+              }
             />
           ))}
         </div>

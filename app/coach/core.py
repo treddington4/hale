@@ -7,15 +7,20 @@ functions here, so the chat-conversational and manual-UI write paths can never
 validate differently.
 """
 import json
+import logging
 import uuid
 from datetime import datetime, timezone
+
+from claude_agent_sdk import ClaudeAgentOptions, ClaudeSDKClient
 
 from .. import stats
 from ..models import (
     HealthNote, Workout, Run, RecoveryTool, RecoverySession, UserTrainingConfig,
-    ExerciseProgress, DEFAULT_USER_ID, owned_by,
+    ExerciseProgress, User, DEFAULT_USER_ID, owned_by,
 )
 from ..util import local_today
+
+log = logging.getLogger("runlog")
 
 VALID_MESOCYCLE_PATTERNS = ("3:1", "2:1", "4:1")
 VALID_DISTRIBUTIONS = ("pyramidal", "polarized")
@@ -402,11 +407,95 @@ PRODUCT_FEEDBACK_PROMPT = (
 )
 
 
-def build_system_prompt(personality: str) -> str:
+WOMENS_STRENGTH_PROMPT = (
+    "The user is female. When strength/weight-training comes up, layer in general, "
+    "evidence-based context relevant to women's strength training: progressive "
+    "overload builds functional strength and muscle tone, not unwanted bulk (a "
+    "common but inaccurate worry) — reassure rather than hedge on this. Resistance "
+    "training also measurably supports bone-density and long-term osteoporosis "
+    "prevention, worth mentioning when relevant. Standard progression principles "
+    "apply the same as for anyone, but stay aware that pelvic-floor-safe "
+    "progression (e.g. controlled breathing/bracing on heavy hinge/squat work, "
+    "avoiding overly aggressive load jumps) is worth a passing mention when it "
+    "fits. This is general fitness-coaching context, not medical advice or a "
+    "diagnosis — the SAFETY OVERRIDE above still governs anything that sounds "
+    "like an actual symptom or condition."
+)
+
+
+def build_system_prompt(personality: str, sex: str | None = None) -> str:
     persona_text = PERSONA_PROMPTS.get(personality, PERSONA_PROMPTS["normal"])
-    return (f"{BASE_PROMPT}\n\n{persona_text}\n\n{SAFETY_OVERRIDE_PROMPT}\n\n"
-            f"{RECOVERY_GUIDANCE_PROMPT}\n\n{CHALLENGE_SAFETY_PROMPT}\n\n"
-            f"{PRODUCT_FEEDBACK_PROMPT}")
+    blocks = [BASE_PROMPT, persona_text, SAFETY_OVERRIDE_PROMPT, RECOVERY_GUIDANCE_PROMPT,
+              CHALLENGE_SAFETY_PROMPT, PRODUCT_FEEDBACK_PROMPT]
+    if sex == "female":
+        blocks.append(WOMENS_STRENGTH_PROMPT)
+    return "\n\n".join(blocks)
+
+
+# Defense in depth against a real failure mode caught in testing (self_review.py,
+# Phase 12.5): a Claude subscription usage-limit response ("You've hit your session
+# limit...") came back as ordinary-looking reply text (not always caught by the
+# msg.error check in run_one_shot below) and got trusted as real content. Any reply
+# matching one of these is treated as a failed call by looks_like_real_content.
+SUSPICIOUS_REPLY_MARKERS = (
+    "session limit", "rate limit", "usage limit", "quota exceeded",
+    "please try again later", "internal server error",
+)
+
+
+def looks_like_real_content(reply: str, existing_body: str | None) -> bool:
+    lowered = reply.lower()
+    if any(marker in lowered for marker in SUSPICIOUS_REPLY_MARKERS):
+        return False
+    # A merge/regen should never come back drastically shorter than what it started
+    # from — that's a stronger signal of a truncated/failed call than of a
+    # legitimate edit.
+    if existing_body and len(reply) < len(existing_body) * 0.5:
+        return False
+    return True
+
+
+async def run_one_shot(system_prompt: str, query_text: str) -> str | None:
+    """Shared ephemeral-client plumbing for any one-shot (no persistent session, no
+    HALE tools) LLM call — originally built for self_review.py's review/merge calls,
+    promoted here (Phase 27) so daily_report.py's report generation reuses the exact
+    same hardening instead of a second copy. Pure text-in/text-out. Returns None on
+    any detected failure (explicit SDK error, exception, or empty reply) so callers
+    can fall back safely rather than trusting a bad response."""
+    options = ClaudeAgentOptions(
+        system_prompt=system_prompt,
+        permission_mode="bypassPermissions",
+        setting_sources=[],
+        # Real bug caught by testing against a ~90-message production transcript:
+        # max_turns=1 cut the model off mid-preamble before it produced the actual
+        # analysis. No tools are available here, so this isn't about tool-call turns
+        # — it's giving the model room to finish a longer response, same headroom
+        # assistant.py's own coaching client gets (max_turns=8).
+        max_turns=8,
+        model="claude-haiku-4-5-20251001",
+    )
+    client = ClaudeSDKClient(options=options)
+    try:
+        await client.connect()
+        await client.query(query_text)
+        reply = ""
+        async for msg in client.receive_response():
+            if type(msg).__name__ == "AssistantMessage":
+                if getattr(msg, "error", None):
+                    log.warning(f"run_one_shot call returned an error: {msg.error}")
+                    return None
+                for block in msg.content:
+                    if type(block).__name__ == "TextBlock":
+                        reply += block.text
+    except Exception:
+        log.exception("run_one_shot call failed")
+        return None
+    finally:
+        try:
+            await client.disconnect()
+        except Exception:
+            pass
+    return reply.strip() or None
 
 
 def get_date_context_block(user_id: str = DEFAULT_USER_ID) -> str:
@@ -508,6 +597,25 @@ def get_recovery_tools_context_block(db, user_id: str = DEFAULT_USER_ID) -> str:
     return (
         "[COACH CONTEXT — recovery tools the user owns, internal, do not quote verbatim]\n"
         + "\n".join(lines) + "\n\n"
+    )
+
+
+def get_activity_context_block(db, activity_id: str | None, user_id: str = DEFAULT_USER_ID) -> str:
+    """Injected per-message like the other context blocks above — gives the model a
+    reliable structured anchor for "this run" when the user tapped 'Ask coach' from an
+    activity card, instead of leaving it to infer which run from prose alone. Returns
+    "" both when no activity_id was passed (the normal free-text chat case) and when
+    the id doesn't resolve (e.g. a stale card open in another tab after the run was
+    deleted) — either way the message still sends normally, just without this anchor."""
+    if not activity_id:
+        return ""
+    detail = stats.run_detail(db, activity_id, user_id=user_id)
+    if not detail:
+        return ""
+    return (
+        "[COACH CONTEXT — the user tapped 'Ask coach' from this specific activity; "
+        "answer about THIS run unless they clearly redirect, internal, do not quote verbatim]\n"
+        + json.dumps(detail) + "\n\n"
     )
 
 
@@ -754,9 +862,14 @@ def get_training_config(db, user_id: str = DEFAULT_USER_ID) -> dict:
     default column still None."""
     config = db.get(UserTrainingConfig, user_id)
     if not config:
+        # Phase 28 — sex-aware default (womens_at_home for a female user, matching
+        # generator.py's own _default_strength_template) so the nightly automatic
+        # rotation starts on the tailored template too, not just Quick Generate.
+        user = db.get(User, user_id)
+        default_template = "womens_at_home" if user and user.sex == "female" else "full_body_ab"
         config = UserTrainingConfig(
             user_id=user_id, weekly_ramp_pct=3.0, mesocycle_pattern="3:1",
-            distribution="pyramidal", strength_days_per_week=2, strength_template="full_body_ab",
+            distribution="pyramidal", strength_days_per_week=2, strength_template=default_template,
         )
     return _training_config_to_dict(config)
 

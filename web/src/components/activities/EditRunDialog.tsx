@@ -1,6 +1,6 @@
 import { useEffect, useState } from "react"
 import type { Run, RunUpdate } from "@/lib/api"
-import { activityFamily, isDistanceActivity, RUN_TYPES, STRENGTH_TYPES } from "@/lib/runs"
+import { activityFamily, isDistanceActivity, RUN_TYPES, STRENGTH_TYPES } from "@/lib/activities"
 import { useGear } from "@/hooks/useGear"
 import { Dialog, DialogContent, DialogHeader, DialogTitle } from "@/components/ui/dialog"
 import { Label } from "@/components/ui/label"

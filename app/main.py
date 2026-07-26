@@ -97,6 +97,17 @@ def startup():
 
         scheduler.add_job(_run_self_review, "cron", hour=4, minute=30, timezone=APP_TIMEZONE)
         log.info(f"Coach self-review scheduled daily at 04:30 {APP_TIMEZONE}")
+
+        def _run_daily_coach_report():
+            from .coach import daily_report
+            daily_report.run_for_all_users()
+
+        # Phase 27.1 — pre-generates each user's daily coach report so a Home load
+        # never waits on the LLM call (routes/chat.py's GET endpoint is now a pure
+        # cache read with a background-task fallback only if this job hasn't run yet
+        # today, e.g. a container restart mid-night).
+        scheduler.add_job(_run_daily_coach_report, "cron", hour=4, minute=45, timezone=APP_TIMEZONE)
+        log.info(f"Daily coach report scheduled daily at 04:45 {APP_TIMEZONE}")
     scheduler.start()
 
 
