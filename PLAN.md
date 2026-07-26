@@ -2906,14 +2906,27 @@ its own connection-style card) and should ship before the smaller UI additions i
       moves from its current standalone spot to inside the Garmin tile's popover
       (under the connection details), since it's a Garmin-specific one-time backfill
       tool, not a general action.
-- [ ] 17.4 **Auto-scheduled background sync on connect**: today `_auto_sync` already
-      runs every credentialed auto-sync-eligible integration on the existing
-      `SYNC_INTERVAL_HOURS` schedule (registry.py) — confirm/adjust so a *newly
-      added* connection is picked up on the very next scheduler tick without
-      requiring a manual "Sync Now" first (likely already true given `_auto_sync`
-      iterates `_users_with_credential` fresh each tick; verify, don't assume).
-      Manual "Sync Now"/backlog buttons stay available inside each popover for
-      on-demand use — this is additive, not a replacement.
+- [x] 17.4 **Auto-scheduled background sync on connect** — done as P8. Two parts:
+      (a) *Verified, not assumed*: `_users_with_credential` opens a fresh session
+      and is called **inside** the job body on every tick (not cached at scheduler
+      registration), so a newly added credential is picked up on the very next tick
+      with no restart and no manual "Sync Now". True for both jobs.
+      (b) Garmin is no longer manual-only: it now polls on its own schedule via
+      `routes/sync.py`'s `_garmin_auto_poll` (every `GARMIN_POLL_INTERVAL_HOURS`,
+      default 3h), kept **separate** from `_auto_sync` rather than flipping
+      registry.py's `auto_sync_eligible` to True — that generic loop calls
+      `sync_recent` unconditionally, so under an active rate-limit cooldown it
+      would record an expected, self-clearing skip as a fresh "last error" every
+      tick. `_garmin_auto_poll` pre-checks the cooldown and a per-user local
+      quiet-hours window and skips silently instead. Safe to poll more often than
+      Strava because `sync_garmin_activities` stops at the first already-synced
+      activity, so a poll finding nothing costs one list call and never a detail
+      fetch. Newly discovered activities now fire a push notification naming them
+      (first real `send_push()` trigger beyond the Settings test button).
+      `GET /api/sync/meta` gained `autoPollEnabled`/`lastAutoPollAttemptAt`/
+      `cooldownUntil`/`consecutiveFailures` so the UI can explain stale data.
+      Manual "Sync Now"/backlog buttons stay available and are never gated by
+      quiet hours — this is additive, not a replacement.
 - [ ] 17.5 **Single "Sync All" button**: one button outside the grid that fires
       `manual_sync` for every connected, `auto_sync_eligible` integration at once
       (Garmin's manual-only nature means it's included here as an explicit action
