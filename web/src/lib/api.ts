@@ -494,9 +494,18 @@ export interface SyncMetaInfo {
   lastError: string | null
 }
 
+// P8 — Garmin-only additive fields so the UI can explain *why* data looks stale
+// (auto-poll off, still cooling down after a rate limit) instead of a bare timestamp.
+export interface GarminSyncMetaInfo extends SyncMetaInfo {
+  autoPollEnabled: boolean
+  lastAutoPollAttemptAt: string | null
+  cooldownUntil: string | null
+  consecutiveFailures: number
+}
+
 export interface SyncMeta {
   strava: SyncMetaInfo
-  garmin: SyncMetaInfo
+  garmin: GarminSyncMetaInfo
   hevy: SyncMetaInfo
 }
 

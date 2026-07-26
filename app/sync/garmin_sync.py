@@ -108,6 +108,28 @@ GARMIN_FIT_ROUTE_ALL_GPS = (
     os.environ.get("GARMIN_FIT_ROUTE_ALL_GPS", "true").lower() == "true"
 )
 
+# P8 — automatic polling (routes/sync.py's _garmin_auto_poll, scheduled from main.py),
+# distinct from the manual "Sync Now" button. Deliberately its own env var, not tied to
+# routes/sync.py's SYNC_INTERVAL_HOURS (Strava/Hevy's shared auto-sync cadence): each
+# poll here is a cheap probe, not a full sync — sync_garmin_activities already lists
+# recent activities with one call and stops at the first already-synced one, only
+# paying for a real detail fetch (the actually rate-limit-sensitive cost) on genuinely
+# new activities. That makes it safe to poll *more* often than Strava's heavier
+# every-6h default, not less, despite Garmin being the riskier/unofficial source —
+# so this defaults shorter than SYNC_INTERVAL_HOURS on purpose. Kept independently
+# tunable since the two sources' rate-limit profiles aren't the same knob.
+GARMIN_AUTO_POLL_ENABLED = os.environ.get("GARMIN_AUTO_POLL_ENABLED", "true").lower() == "true"
+GARMIN_POLL_INTERVAL_HOURS = float(os.environ.get("GARMIN_POLL_INTERVAL_HOURS", "3"))
+# Skip auto-polls while the user is very likely asleep, since no new activity can
+# plausibly appear then — narrow window (default 1am-5am local), not "evening", since
+# early-morning and late-evening workouts are both common and shouldn't be missed by a
+# poll that only runs every GARMIN_POLL_INTERVAL_HOURS anyway. Per-user local time
+# (util.user_timezone), not the container's own clock — same reasoning as local_today().
+# Manual "Sync Now" is never affected by this — only the scheduled auto-poll checks it.
+GARMIN_POLL_QUIET_START_HOUR = int(os.environ.get("GARMIN_POLL_QUIET_START_HOUR", "1"))
+GARMIN_POLL_QUIET_END_HOUR = int(os.environ.get("GARMIN_POLL_QUIET_END_HOUR", "5"))
+GARMIN_AUTO_POLL_LAST_ATTEMPT_KEY = "garmin_auto_poll_last_attempt_at"
+
 METERS_PER_MILE = 1609.34
 SEMICIRCLE_TO_DEGREES = 180 / (2**31)
 GRAMS_PER_LB = 453.592
@@ -1380,6 +1402,22 @@ def _clear_garmin_rate_limit_cooldown(user_id: str):
     set_sync_meta(user_key(user_id, GARMIN_RATE_LIMIT_FAILURES_KEY), "0")
     set_sync_meta(user_key(user_id, GARMIN_RATE_LIMIT_COOLDOWN_UNTIL_KEY), "")
     log.debug("garmin rate limit cooldown cleared")
+
+
+def is_in_poll_quiet_hours(user_id: str) -> bool:
+    """P8 — true during the user's local quiet-hours window (default 1am-5am), when
+    the scheduled auto-poll should skip this user entirely rather than spend even the
+    cheap probe's one API call. Only gates the automatic poll (routes/sync.py's
+    _garmin_auto_poll); manual "Sync Now" always runs regardless of the hour. Handles
+    a window that wraps past midnight (e.g. start=23, end=5) the same as one that
+    doesn't (start=1, end=5)."""
+    from ..util import user_timezone
+    from zoneinfo import ZoneInfo
+    hour = datetime.now(ZoneInfo(user_timezone(user_id))).hour
+    start, end = GARMIN_POLL_QUIET_START_HOUR, GARMIN_POLL_QUIET_END_HOUR
+    if start <= end:
+        return start <= hour < end
+    return hour >= start or hour < end
 
 
 def sync_garmin_activities(user_id: str, limit: int = 10, progress_cb=None):

@@ -81,6 +81,13 @@ INTEGRATIONS: dict[str, Integration] = {
     ),
     "garmin": Integration(
         name="garmin",
+        # False here still means "not part of the generic INTEGRATIONS-driven
+        # _auto_sync loop in routes/sync.py" — but as of P8, Garmin is NOT purely
+        # manual anymore: it has its own separate scheduled auto-poll
+        # (routes/sync.py's _garmin_auto_poll, registered in main.py), gated by its
+        # own cooldown pre-check and quiet-hours logic that the generic loop doesn't
+        # have. Kept out of this flag/loop deliberately (see this module's docstring
+        # and _garmin_auto_poll's own docstring) rather than flipping this to True.
         auto_sync_eligible=False,
         has_credential=lambda user_id: _has_garmin_credential(user_id),
         sync_recent=lambda user_id, progress_cb=None: garmin_sync.sync_garmin_activities(user_id, limit=SYNC_LIMIT, progress_cb=progress_cb),

@@ -1,5 +1,6 @@
 import os
 import logging
+from datetime import datetime
 
 from fastapi import FastAPI, Request
 from fastapi.responses import FileResponse
@@ -75,6 +76,15 @@ def startup():
         scheduler.add_job(sync._auto_sync, "interval", hours=sync.SYNC_INTERVAL_HOURS,
                            next_run_time=sync._next_auto_sync_time())
         log.info(f"Auto-sync scheduled every {sync.SYNC_INTERVAL_HOURS}h")
+
+        from .sync import garmin_sync
+        scheduler.add_job(sync._garmin_auto_poll, "interval", hours=garmin_sync.GARMIN_POLL_INTERVAL_HOURS,
+                           next_run_time=datetime.now())
+        log.info(
+            f"Garmin auto-poll scheduled every {garmin_sync.GARMIN_POLL_INTERVAL_HOURS}h "
+            f"(enabled={garmin_sync.GARMIN_AUTO_POLL_ENABLED}, quiet hours "
+            f"{garmin_sync.GARMIN_POLL_QUIET_START_HOUR}:00-{garmin_sync.GARMIN_POLL_QUIET_END_HOUR}:00 local)"
+        )
 
         def _run_generator():
             from .coach import generator

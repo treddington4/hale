@@ -14,7 +14,7 @@ from datetime import datetime, timezone
 
 from fastapi import APIRouter, HTTPException, Request, UploadFile, File, Depends
 
-from ..models import SessionLocal, ProviderCredential, get_sync_meta, set_sync_meta, user_key
+from ..models import SessionLocal, ProviderCredential, Run, get_sync_meta, set_sync_meta, user_key, owned_by
 from ..accounts import auth
 from ..sync import garmin_sync, hevy_sync
 from ..sync.registry import INTEGRATIONS, SYNC_LIMIT
@@ -59,8 +59,9 @@ def _users_with_credential(provider: str):
 
 def _auto_sync():
     """Runs every auto-sync-eligible integration (official/documented APIs — Strava,
-    Hevy; Garmin is manual-only, see registry.py's own auto_sync_eligible flags) for
-    every user with a credential on file, not just one hardcoded account — today
+    Hevy; Garmin stays out of this generic loop per registry.py's auto_sync_eligible
+    flag — see _garmin_auto_poll below for its own, differently-gated P8 equivalent)
+    for every user with a credential on file, not just one hardcoded account — today
     that's still just DEFAULT_USER_ID in practice (no real login exists yet), but the
     loop is already correct for whenever there's more than one."""
     import logging
@@ -79,6 +80,105 @@ def _auto_sync():
                 log.warning(f"Auto-sync skipped for {user_id}/{source}: {e}")
             if source == "hevy":
                 _run_pending_enrichments(user_id)
+
+
+def _describe_activity(a) -> str:
+    """One-line label for a push body: distance for distance activities, duration for
+    strength/yoga (which have no meaningful mileage — see stats._all_distance_activities)."""
+    name = a.name or "Activity"
+    if a.distance_mi:
+        return f"{name} · {a.distance_mi:.2f} mi"
+    if a.moving_time_sec:
+        mins = round(a.moving_time_sec / 60)
+        return f"{name} · {mins} min"
+    return name
+
+
+def _notify_new_garmin_activities(user_id: str, count: int):
+    """Push notification for activities the *scheduled* poll discovered — deliberately
+    not fired from manual "Sync Now" or backlog sync, where the user is already watching
+    a live progress log and a notification would just be noise. This is the first real
+    trigger for send_push() beyond the Settings test button.
+
+    Best-effort in every direction: send_push() already returns 0 when VAPID isn't
+    configured and prunes dead subscriptions itself, and the whole thing is wrapped so a
+    notification problem can never turn a successful sync into a recorded failure.
+
+    Names the activities rather than sending a bare count — "Manchester - Long Run ·
+    8.89 mi" is the actual reason to look, and identifying the newly-synced rows by
+    `detail_synced_at` (set at the end of a successful _process_activity) is exact
+    rather than a guess based on activity date, which can lag for a late device upload."""
+    import logging
+    log = logging.getLogger("runlog")
+    try:
+        from .. import push
+        if not push.is_configured():
+            return
+        db = SessionLocal()
+        try:
+            recent = (
+                db.query(Run)
+                .filter(Run.source == "garmin", owned_by(Run.user_id, user_id))
+                .filter(Run.detail_synced_at.isnot(None))
+                .order_by(Run.detail_synced_at.desc())
+                .limit(count)
+                .all()
+            )
+            if not recent:
+                return
+            if len(recent) == 1:
+                title = "New Garmin activity"
+                body = _describe_activity(recent[0])
+            else:
+                title = f"{len(recent)} new Garmin activities"
+                body = ", ".join(a.name or "Activity" for a in recent)
+            push.send_push(db, user_id, title, body, url="/activities")
+        finally:
+            db.close()
+    except Exception as e:
+        log.warning(f"Garmin auto-poll notification failed (sync itself was fine): {e}")
+
+
+def _garmin_auto_poll():
+    """P8 — Garmin's own scheduled auto-poll, deliberately kept separate from
+    _auto_sync's generic INTEGRATIONS loop above (registry.py's auto_sync_eligible=False
+    for Garmin is unchanged; this is a parallel path, not a flip of that flag). Folding
+    Garmin into the generic loop would call sync_recent unconditionally on every tick,
+    which under an active rate-limit cooldown would raise straight out of
+    _raise_if_garmin_cooling_down and get recorded as a fresh "last error" every single
+    tick — misleading (it's an expected, self-clearing skip, not a real failure) and
+    noisy. Pre-checking the cooldown here means a skip during cooldown is silent (just
+    a debug log line), matching how the quiet-hours skip below is also silent.
+
+    Each call here is cheap regardless of outcome: sync_garmin_activities's own
+    early-stop (see its docstring) means a poll that finds nothing new costs one
+    activity-list call plus whatever the already-running wellness volatile-window
+    check costs — never a full detail-fetch pass."""
+    import logging
+    log = logging.getLogger("runlog")
+    if not garmin_sync.GARMIN_AUTO_POLL_ENABLED:
+        return
+    for user_id in _users_with_credential("garmin"):
+        set_sync_meta(user_key(user_id, garmin_sync.GARMIN_AUTO_POLL_LAST_ATTEMPT_KEY), datetime.now(timezone.utc).isoformat())
+        if garmin_sync.is_in_poll_quiet_hours(user_id):
+            log.debug(f"Garmin auto-poll: skipping {user_id} — quiet hours")
+            continue
+        if garmin_sync._garmin_cooldown_remaining_sec(user_id) > 0:
+            log.debug(f"Garmin auto-poll: skipping {user_id} — cooldown still active")
+            continue
+        set_sync_meta(user_key(user_id, "garmin_last_error"), "")
+        try:
+            n = garmin_sync.sync_garmin_activities(user_id, limit=SYNC_LIMIT)
+            stats.record_sync("garmin", user_id, count=n)
+            log.info(f"Garmin auto-poll: upserted {n} for {user_id}")
+            if n > 0:
+                _notify_new_garmin_activities(user_id, n)
+        except Exception as e:
+            stats.record_sync("garmin", user_id, error=str(e))
+            if garmin_sync.is_rate_limit_related(e):
+                log.info(f"Garmin auto-poll: rate-limited for {user_id}, cooldown engaged — {e}")
+            else:
+                log.warning(f"Garmin auto-poll failed for {user_id}: {e}")
 
 
 def _run_pending_enrichments(user_id: str, progress_cb=None):
@@ -239,11 +339,25 @@ async def import_garmin_export(file: UploadFile = File(...), user_id: str = Depe
 def sync_meta(user_id: str = Depends(auth.current_user_id)):
     def info(source: str):
         count = get_sync_meta(user_key(user_id, f"{source}_last_count"))
-        return {
+        result = {
             "lastSyncedAt": get_sync_meta(user_key(user_id, f"{source}_last_synced_at")),
             "lastCount": int(count) if count is not None else None,
             "lastError": get_sync_meta(user_key(user_id, f"{source}_last_error")) or None,
         }
+        if source == "garmin":
+            # P8 — additive-only fields so the UI can explain *why* Garmin data looks
+            # stale (auto-poll disabled, still cooling down after a rate limit, quiet
+            # hours) instead of just showing a bare timestamp like Strava/Hevy get.
+            failures = get_sync_meta(user_key(user_id, garmin_sync.GARMIN_RATE_LIMIT_FAILURES_KEY))
+            cooldown_remaining = garmin_sync._garmin_cooldown_remaining_sec(user_id)
+            result["autoPollEnabled"] = garmin_sync.GARMIN_AUTO_POLL_ENABLED
+            result["lastAutoPollAttemptAt"] = get_sync_meta(user_key(user_id, garmin_sync.GARMIN_AUTO_POLL_LAST_ATTEMPT_KEY))
+            result["cooldownUntil"] = (
+                get_sync_meta(user_key(user_id, garmin_sync.GARMIN_RATE_LIMIT_COOLDOWN_UNTIL_KEY))
+                if cooldown_remaining > 0 else None
+            )
+            result["consecutiveFailures"] = int(failures) if failures else 0
+        return result
     return {source: info(source) for source in INTEGRATIONS}
 
 
