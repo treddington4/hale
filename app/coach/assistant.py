@@ -71,7 +71,7 @@ def _build_tools(user_id: str, is_test: bool = False) -> list:
     schedule_workout) create, so a verification session's tool calls never pollute a
     real user's health/workout history."""
 
-    @tool("get_run_summary", "Totals/averages (count, distance, pace, elevation, time) over an optional date range", {
+    @tool("get_run_summary", "Totals/averages (count, distance, pace, elevation, time) over an optional date range. Pace is always in MM:SS/mi format — quote it exactly, never convert to sec/mi.", {
         "type": "object",
         "properties": {
             "startDate": {"type": "string", "description": "YYYY-MM-DD, inclusive"},
@@ -82,7 +82,11 @@ def _build_tools(user_id: str, is_test: bool = False) -> list:
     async def get_run_summary(args):
         result = _db_call(stats.run_summary, args.get("startDate"), args.get("endDate"),
                            args.get("activityType", "Run"), user_id=user_id)
-        return {"content": [{"type": "text", "text": json.dumps(result)}]}
+        activity_type = args.get("activityType", "Run")
+        pace_display = stats.format_pace_or_speed(result.get("avgPaceSecPerMi"), activity_type)
+        filtered = {k: v for k, v in result.items() if k != "avgPaceSecPerMi"}
+        filtered["avgPaceDisplay"] = pace_display or "n/a"
+        return {"content": [{"type": "text", "text": json.dumps(filtered)}]}
 
     @tool("get_weekly_mileage", "Weekly mileage totals for the trailing N weeks", {
         "type": "object",
@@ -149,7 +153,7 @@ def _build_tools(user_id: str, is_test: bool = False) -> list:
         result = _db_call(stats.daily_steps_summary, args.get("days", 30), user_id=user_id)
         return {"content": [{"type": "text", "text": json.dumps(result)}]}
 
-    @tool("query_runs", "Flexible run lookup: filter by date range/type/distance, sort, limit. Use for free-form questions the other tools don't cover.", {
+    @tool("query_runs", "Flexible run lookup: filter by date range/type/distance, sort, limit. Use for free-form questions the other tools don't cover. Pace is always in MM:SS/mi format — quote exactly, never convert.", {
         "type": "object",
         "properties": {
             "startDate": {"type": "string"},
@@ -168,9 +172,17 @@ def _build_tools(user_id: str, is_test: bool = False) -> list:
             args.get("minDistance"), args.get("maxDistance"),
             args.get("sortBy", "date"), args.get("limit", 20), user_id=user_id,
         )
-        return {"content": [{"type": "text", "text": json.dumps(result)}]}
+        formatted = []
+        for r in result:
+            r_copy = dict(r)
+            pace_display = stats.format_pace_or_speed(r.get("paceSecPerMi"), r.get("activityType", "Run"))
+            if "paceSecPerMi" in r_copy:
+                del r_copy["paceSecPerMi"]
+            r_copy["paceDisplay"] = pace_display or "n/a"
+            formatted.append(r_copy)
+        return {"content": [{"type": "text", "text": json.dumps(formatted)}]}
 
-    @tool("get_run_detail", "Full detail for a single run by id (splits, HR, notes) — use the id from query_runs/get_personal_records", {
+    @tool("get_run_detail", "Full detail for a single run by id (splits, HR, notes) — use the id from query_runs/get_personal_records. Pace is in MM:SS/mi — quote exactly.", {
         "type": "object",
         "properties": {"runId": {"type": "string"}},
         "required": ["runId"],
@@ -179,7 +191,12 @@ def _build_tools(user_id: str, is_test: bool = False) -> list:
         result = _db_call(stats.run_detail, args["runId"], user_id=user_id)
         if result is None:
             return {"content": [{"type": "text", "text": f"No run found with id {args['runId']}"}], "is_error": True}
-        return {"content": [{"type": "text", "text": json.dumps(result)}]}
+        r_copy = dict(result)
+        pace_display = stats.format_pace_or_speed(result.get("paceSecPerMi"), result.get("activityType", "Run"))
+        if "paceSecPerMi" in r_copy:
+            del r_copy["paceSecPerMi"]
+        r_copy["paceDisplay"] = pace_display or "n/a"
+        return {"content": [{"type": "text", "text": json.dumps(r_copy)}]}
 
     @tool("get_health_history", "List logged health notes (injuries, illness, chronic-condition flares, scheduled procedures, or other temporary things affecting training). Use before making assumptions about the user's current health state.", {
         "type": "object",
