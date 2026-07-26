@@ -104,7 +104,7 @@ def run_for_all_users() -> None:
     """Cron entry point (main.py, scheduled daily at 04:45 APP_TIMEZONE) — pre-
     generates every non-demo user's report so a Home load never has to wait on the
     LLM call. Exception-isolated per user, mirroring self_review.run_for_all_users'
-    identical pattern."""
+    identical pattern. P12: sends push notification after report generates."""
     db = SessionLocal()
     try:
         user_ids = [u.id for u in db.query(User).filter(User.is_demo.isnot(True)).all()]
@@ -113,5 +113,14 @@ def run_for_all_users() -> None:
     for uid in user_ids:
         try:
             asyncio.run(generate_and_cache(uid))
+            # P12 — push notification after report generates (best-effort, no-op if unsubscribed)
+            db = SessionLocal()
+            try:
+                from ..push import send_push
+                send_push(db, uid, "Daily Report Ready", "Your daily coach report is ready to read.", "/")
+            except Exception:
+                log.exception(f"push notification failed for daily_report user {uid}")
+            finally:
+                db.close()
         except Exception:
             log.exception(f"daily_report.run_for_all_users failed for {uid}")

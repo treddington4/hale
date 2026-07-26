@@ -787,7 +787,17 @@ def run_for_all_users(date=None) -> dict:
         results = {}
         for user in users:
             try:
-                results[user.id] = run_for_user(db, user.id, date)
+                result = run_for_user(db, user.id, date)
+                results[user.id] = result
+                # P12 — push notification when workout is prescribed (best-effort, no-op if unsubscribed)
+                has_workout = result.get("endurance") or result.get("strength")
+                if has_workout:
+                    try:
+                        from ..push import send_push
+                        workout_type = "endurance" if result.get("endurance") else "strength"
+                        send_push(db, user.id, "Workout Ready", f"Your {workout_type} workout for tomorrow is ready.", "/workouts")
+                    except Exception:
+                        log.exception(f"push notification failed for generator user {user.id}")
             except Exception as e:
                 log.warning(f"generator: run failed for {user.id}: {e}")
                 results[user.id] = {"error": str(e)}
