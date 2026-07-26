@@ -18,7 +18,7 @@ from datetime import datetime, timedelta, timezone
 from sqlalchemy import func
 
 from .models import (
-    Run, DailySteps, Goal, Gear, UserTrainingConfig, DEFAULT_USER_ID, owned_by,
+    Activity, Run, DailySteps, Goal, Gear, UserTrainingConfig, DEFAULT_USER_ID, owned_by,
     SessionLocal, get_sync_meta, set_sync_meta, user_key,
 )
 from .util import local_today, compute_tss, compute_efficiency_factor
@@ -150,8 +150,9 @@ def is_plausible_hr(bpm, hr_floor) -> bool:
 def run_detail(db, run_id: str, user_id: str = DEFAULT_USER_ID) -> dict | None:
     """Full single-run detail (splits, HR, notes) — shared by assistant.py's
     get_run_detail chat tool and the "ask coach about this activity" hidden context
-    block (coach/core.py's get_activity_context_block), so both see identical data."""
-    r = db.query(Run).filter(Run.id == run_id, owned_by(Run.user_id, user_id)).first()
+    block (coach/core.py's get_activity_context_block), so both see identical data.
+    P7c: Use Activity for polymorphic query across all activity types."""
+    r = db.query(Activity).filter(Activity.id == run_id, owned_by(Activity.user_id, user_id)).first()
     if not r:
         return None
     hr_floor = get_hr_floor(db, user_id)
@@ -175,17 +176,21 @@ def _all_runs(db, activity_type="run", user_id: str = DEFAULT_USER_ID):
 
     P6 changes default from "Run" to "run" (normalized form) — all downstream callers
     already pass "Run" or list-of-types, and _normalize_activity_type("Run") → "run".
+    P7c: Changed from db.query(Run) to db.query(Activity) for proper polymorphic querying
+    over the STI hierarchy — Run is now a subclass, and Activity is the base for the
+    single-table inheritance on the `runs` table. This doesn't change filtering behavior
+    (sti_type is still applied via activity_type), but makes the intent clearer.
     Applies dedup.merge_duplicate_runs() to the query result — see that module's
     docstring for why. P3 landed dedup before normalization was complete; P4 backfilled
     stored values and broadens this filter to canonical families, so dedup now stops the
     duplicates instead of the old exact-match filter doing it accidentally."""
     from .dedup import merge_duplicate_runs
 
-    q = db.query(Run).filter(owned_by(Run.user_id, user_id))
+    q = db.query(Activity).filter(owned_by(Activity.user_id, user_id))
     if activity_type:
         types = [activity_type] if isinstance(activity_type, str) else list(activity_type)
         normalized_types = [_normalize_activity_type(t) for t in types]
-        q = q.filter(Run.activity_type.in_(normalized_types))
+        q = q.filter(Activity.activity_type.in_(normalized_types))
     return merge_duplicate_runs(q.all())
 
 
@@ -720,7 +725,7 @@ def _find_and_link_race_run(db, goal, types, user_id):
         return None
 
     wanted = {_normalize_activity_type(t) for t in types}
-    candidates = db.query(Run).filter(Run.date == target.isoformat()).filter(owned_by(Run.user_id, user_id)).all()
+    candidates = db.query(Activity).filter(Activity.date == target.isoformat()).filter(owned_by(Activity.user_id, user_id)).all()
     candidates = [r for r in candidates if _normalize_activity_type(r.activity_type) in wanted]
     if not candidates:
         return None
@@ -822,7 +827,7 @@ def backfill_run_metrics(db, user_id: str = DEFAULT_USER_ID) -> int:
     always recomputes from source fields rather than incrementally adjusting."""
     config = db.get(UserTrainingConfig, user_id)
     threshold_hr = config.threshold_hr if config else None
-    runs = db.query(Run).filter(owned_by(Run.user_id, user_id)).all()
+    runs = db.query(Activity).filter(owned_by(Activity.user_id, user_id)).all()
     for r in runs:
         r.tss = compute_tss(r.moving_time_sec, r.avg_hr, threshold_hr, r.suggested_type, activity_family(r.activity_type))
         r.efficiency_factor = compute_efficiency_factor(r.avg_pace_sec_per_mi, r.avg_hr)
