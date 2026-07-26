@@ -36,7 +36,7 @@ def _normalize_activity_type(t: str) -> str:
     t = (t or "").lower().replace("_", "")
     if "run" in t:
         return "run"
-    if "cycl" in t or t == "ride":
+    if "cycl" in t or "bik" in t or t == "ride":
         return "ride"
     if "walk" in t:
         return "walk"
@@ -44,6 +44,10 @@ def _normalize_activity_type(t: str) -> str:
         return "hike"
     if "swim" in t:
         return "swim"
+    if "weight" in t or "strength" in t:
+        return "strength"
+    if "yoga" in t:
+        return "yoga"
     return t
 
 PACE_MIN_SEC_PER_MI = 240
@@ -61,6 +65,23 @@ def is_plausible_pace(pace_sec_per_mi, distance_mi=None) -> bool:
     if distance_mi is not None and distance_mi < MIN_DISTANCE_MI:
         return False
     return PACE_MIN_SEC_PER_MI <= pace_sec_per_mi <= PACE_MAX_SEC_PER_MI
+
+
+def format_pace_or_speed(pace_sec_per_mi, activity_type: str = "Run") -> str | None:
+    """Human-readable pace/speed string for coach-facing (LLM) prompts — never hand a
+    raw seconds-per-mile number to an LLM and expect it to reliably reformat/convert
+    units on its own. Real bug caught from actual use: the daily coach report once
+    echoed "596.9 sec/mi" verbatim instead of "9:57/mi". Running/walking/hiking read
+    naturally as MM:SS/mi; cycling reads naturally as mph — same distinction the user
+    asked for directly ("min/mile or miles/hr" depending on activity)."""
+    if not pace_sec_per_mi or pace_sec_per_mi <= 0:
+        return None
+    t = (activity_type or "").lower()
+    if "ride" in t or "cycl" in t or "bik" in t:
+        return f"{3600 / pace_sec_per_mi:.1f} mph"
+    minutes = int(pace_sec_per_mi // 60)
+    seconds = round(pace_sec_per_mi % 60)
+    return f"{minutes}:{seconds:02d}/mi"
 
 
 def latest_resting_hr_bpm(db, user_id: str = DEFAULT_USER_ID):
@@ -102,6 +123,26 @@ def get_hr_floor(db, user_id: str = DEFAULT_USER_ID) -> float:
 
 def is_plausible_hr(bpm, hr_floor) -> bool:
     return bpm is not None and bpm >= hr_floor
+
+
+def run_detail(db, run_id: str, user_id: str = DEFAULT_USER_ID) -> dict | None:
+    """Full single-run detail (splits, HR, notes) — shared by assistant.py's
+    get_run_detail chat tool and the "ask coach about this activity" hidden context
+    block (coach/core.py's get_activity_context_block), so both see identical data."""
+    r = db.query(Run).filter(Run.id == run_id, owned_by(Run.user_id, user_id)).first()
+    if not r:
+        return None
+    hr_floor = get_hr_floor(db, user_id)
+    return {
+        "id": r.id, "date": r.date, "name": r.name, "activityType": r.activity_type,
+        "distanceMi": r.distance_mi, "movingTimeSec": r.moving_time_sec,
+        "paceSecPerMi": r.avg_pace_sec_per_mi if is_plausible_pace(r.avg_pace_sec_per_mi, r.distance_mi) else None,
+        "avgHR": r.avg_hr if is_plausible_hr(r.avg_hr, hr_floor) else None,
+        "maxHR": r.max_hr if is_plausible_hr(r.max_hr, hr_floor) else None,
+        "elevGainFt": r.elev_gain_ft, "avgCadence": r.avg_cadence,
+        "type": r.type_override or r.suggested_type, "rpe": r.rpe, "notes": r.notes,
+        "splits": json.loads(r.splits_json or "[]"),
+    }
 
 
 def _all_runs(db, activity_type="Run", user_id: str = DEFAULT_USER_ID):
@@ -506,6 +547,37 @@ def daily_steps_summary(db, days: int = 30, user_id: str = DEFAULT_USER_ID):
     return {
         "days": [{"date": r.date, "steps": r.steps} for r in rows],
         "avgSteps": round(sum(steps) / len(steps)) if steps else None,
+    }
+
+
+def wellness_trend(db, days: int = 7, user_id: str = DEFAULT_USER_ID) -> dict:
+    """Trailing-N-day training-readiness/ACWR/race-prediction/body-battery/stress
+    trend — the Phase 24 DailySteps columns, never exposed anywhere before Phase 27
+    (daily coach report). Single computation core per this module's own docstring:
+    any future chart/chat tool wanting this trend should call this, not re-query.
+
+    `days=N` means N calendar days inclusive of today (today, today-1, ..., today-
+    (N-1)) — timedelta(days=days) would give an N+1-day window (a real off-by-one
+    caught in testing via daily_report.py, which fed this into a user-facing "past
+    7 days" claim that was actually counting 8 days)."""
+    cutoff = (local_today(user_id) - timedelta(days=days - 1)).isoformat()
+    rows = (db.query(DailySteps).filter(DailySteps.date >= cutoff)
+            .filter(owned_by(DailySteps.user_id, user_id)).order_by(DailySteps.date).all())
+    return {
+        "days": [{
+            "date": r.date,
+            "trainingReadinessScore": r.training_readiness_score,
+            "trainingReadinessLevel": r.training_readiness_level,
+            "garminAcwr": r.garmin_acwr,
+            "garminAcwrStatus": r.garmin_acwr_status,
+            "racePredict5kSec": r.race_predict_5k_sec,
+            "racePredict10kSec": r.race_predict_10k_sec,
+            "racePredictHalfMarathonSec": r.race_predict_half_marathon_sec,
+            "racePredictMarathonSec": r.race_predict_marathon_sec,
+            "bodyBatteryCharged": r.body_battery_charged,
+            "bodyBatteryDrained": r.body_battery_drained,
+            "avgStressLevel": r.avg_stress_level,
+        } for r in rows],
     }
 
 

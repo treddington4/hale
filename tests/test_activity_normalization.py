@@ -36,23 +36,10 @@ def test_canonical_type(raw, expected):
     assert _normalize_activity_type(raw) == expected
 
 
-@pytest.mark.xfail(
-    reason="KNOWN GAP — P2 fixes this. The backend normalizer checks 'cycl' and an "
-           "exact 'ride' but not 'bik', so 'road_biking' falls through to the raw "
-           "de-underscored string. The frontend's canonicalActivityType DOES check "
-           "'bik', which is one of the four-normalizer inconsistencies P2 collapses.",
-    strict=True,
-)
 def test_road_biking_normalizes_to_ride():
     assert _normalize_activity_type("road_biking") == "ride"
 
 
-@pytest.mark.xfail(
-    reason="KNOWN GAP — P2 fixes this. Strength arrives as both Garmin's "
-           "'strength_training' and Strava's 'WeightTraining'; neither is recognized, "
-           "so they never unify into one family.",
-    strict=True,
-)
 @pytest.mark.parametrize("raw", ["WeightTraining", "strength_training"])
 def test_strength_spellings_unify(raw):
     assert _normalize_activity_type(raw) == "strength"

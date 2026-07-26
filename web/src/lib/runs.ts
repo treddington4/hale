@@ -137,7 +137,7 @@ export function isDistanceActivity(activityType: string | null | undefined): boo
 }
 
 export function isRunActivity(r: Run): boolean {
-  return (r.activityType || "Run") === "Run"
+  return canonicalActivityType(r.activityType) === "run"
 }
 
 // Sum of reps*weightLb across a run's exerciseSets (Garmin-only, strength_training).
@@ -154,10 +154,36 @@ function isEmptyValue(v: unknown): boolean {
   return v == null || (Array.isArray(v) && v.length === 0)
 }
 
+// Pure date/type/distance/time proximity check -- deliberately does NOT check
+// source distinctness itself (unlike the pre-Phase-25 version). That's the
+// caller's job now: mergeDuplicateRuns applies a stricter rule for two
+// same-source candidates (only join a group with third-party corroboration)
+// than for cross-source ones, since some accounts have BOTH Garmin->Strava
+// and Hevy->Strava auto-posting independently for the same physical workout
+// (confirmed live) -- two genuinely different same-source activities that
+// happen to be close in time (e.g. two separate real rides) must never be
+// force-merged just because they resemble each other on their own, but two
+// real same-source rows that both corroborate against a shared third source
+// safely can be.
 function isLikelyDuplicate(a: Run, b: Run): boolean {
-  if (a.source === b.source) return false
   if (a.date !== b.date) return false
-  if (canonicalActivityType(a.activityType) !== canonicalActivityType(b.activityType)) return false
+
+  const typeA = canonicalActivityType(a.activityType)
+  const typeB = canonicalActivityType(b.activityType)
+  // Strava's own generic "Workout" activityType -- its catch-all for
+  // activities it can't classify more specifically -- doesn't meaningfully
+  // discriminate between families. Confirmed live: Hevy's own direct
+  // Strava-posting integration uses this generic type for some workouts
+  // (e.g. a recovery/mobility session) instead of "WeightTraining", which
+  // would otherwise fail an exact-type match against the same workout's real
+  // Hevy/Garmin rows before the date/time checks below ever got a chance to
+  // confirm it's the same event. Treated as a wildcard here rather than
+  // widening canonicalActivityType itself, which stays a general-purpose
+  // classifier used elsewhere (e.g. the Activities page's type filter) where
+  // this leniency wouldn't be appropriate.
+  const isWildcard = (t: string) => t === "workout"
+  if (typeA !== typeB && !isWildcard(typeA) && !isWildcard(typeB)) return false
+  const effectiveType = isWildcard(typeA) ? typeB : typeA
 
   const toMin = (t: string) => {
     const [h, m] = t.split(":").map(Number)
@@ -169,7 +195,7 @@ function isLikelyDuplicate(a: Run, b: Run): boolean {
   // match for them -- match on start-time proximity alone instead, same
   // ~30min tolerance the backend's own Hevy<->Garmin matcher already uses
   // (garmin_enrich.py's find_matching_garmin_run) for exactly this pairing.
-  if (canonicalActivityType(a.activityType) === "strength") {
+  if (effectiveType === "strength") {
     if (!a.startTime || !b.startTime) return false
     return Math.abs(toMin(a.startTime) - toMin(b.startTime)) <= 30
   }
@@ -192,26 +218,47 @@ function isLikelyDuplicate(a: Run, b: Run): boolean {
 // stats._gear_kind_for_activity's own docstring on how unreliable that
 // detection is), so Hevy's name/exerciseSets win regardless of general merge
 // order, mirroring the Garmin-name exception above.
-function mergeRunPair(a: Run, b: Run): Run {
-  const bySource = (src: string) => (a.source === src ? a : b.source === src ? b : null)
-  const strava = bySource("strava")
-  const hevy = bySource("hevy")
-  const garmin = bySource("garmin")
+//
+// Takes a group of 2+ mutual duplicates rather than just a pair -- a real
+// account can have a Garmin activity auto-forwarded to Strava (a common Garmin
+// Connect setting) on top of a Hevy log of the same workout, producing three
+// (or more) raw rows for one physical session, not just two.
+function mergeRunGroup(group: Run[]): Run {
+  const strava = group.find((r) => r.source === "strava") ?? null
+  const hevy = group.find((r) => r.source === "hevy") ?? null
+  const garmin = group.find((r) => r.source === "garmin") ?? null
+  const primary = strava ?? hevy ?? group[0]
 
-  const primary = strava ?? hevy ?? a
-  const secondary = primary === a ? b : a
-  const merged: Run = { ...secondary }
-  Object.entries(primary).forEach(([k, v]) => {
-    if (!isEmptyValue(v)) (merged as Record<string, unknown>)[k] = v
-  })
+  // Start from primary's own fields (never overwritten below), then let the
+  // rest of the group backfill anything primary doesn't have -- equivalent to
+  // the old two-way "secondary spread, then overlay primary's non-empty
+  // fields" but generalized to any group size without needing a fold.
+  const merged: Run = { ...primary }
+  for (const r of group) {
+    if (r === primary) continue
+    Object.entries(r).forEach(([k, v]) => {
+      if (isEmptyValue((merged as Record<string, unknown>)[k])) (merged as Record<string, unknown>)[k] = v
+    })
+  }
   if (hevy) {
     if (!isEmptyValue(hevy.name)) merged.name = hevy.name
     if (!isEmptyValue(hevy.exerciseSets)) merged.exerciseSets = hevy.exerciseSets
   } else if (garmin && !isEmptyValue(garmin.name)) {
     merged.name = garmin.name
   }
-  merged.mergedSources = [a.source, b.source].sort()
-  merged.mergedIds = [a.id, b.id]
+  // Garmin's route is parsed from the raw FIT record stream (see
+  // garmin_sync.py's route_source diagnostic), not subject to whatever privacy
+  // zone Strava applies -- confirmed live: this account has Strava's own
+  // "hide first/last quarter mile" privacy setting on, which clips Strava's
+  // route/routeMetrics but never Garmin's. Overrides the general primary-based
+  // merge above (which would otherwise let Strava's route win whenever Strava
+  // is present) whenever Garmin has real route data to offer.
+  if (garmin && !isEmptyValue(garmin.route)) {
+    merged.route = garmin.route
+    merged.routeMetrics = garmin.routeMetrics
+  }
+  merged.mergedSources = Array.from(new Set(group.map((r) => r.source))).sort()
+  merged.mergedIds = group.map((r) => r.id)
   return merged
 }
 
@@ -220,20 +267,46 @@ export function mergeDuplicateRuns(rawRuns: Run[]): Run[] {
   const merged: Run[] = []
   for (let i = 0; i < rawRuns.length; i++) {
     if (used[i]) continue
-    let matchIdx = -1
-    for (let j = i + 1; j < rawRuns.length; j++) {
-      if (used[j]) continue
-      if (isLikelyDuplicate(rawRuns[i], rawRuns[j])) {
-        matchIdx = j
-        break
+    const group = [rawRuns[i]]
+    used[i] = true
+    // Re-scan to a fixed point rather than a single forward pass: a same-
+    // source candidate that needs corroboration (see below) may sit earlier
+    // in the array than the differently-sourced row that would corroborate
+    // it, so one pass can miss it. Looping until a full pass adds nothing
+    // new catches those regardless of array order.
+    let addedAny = true
+    while (addedAny) {
+      addedAny = false
+      for (let j = 0; j < rawRuns.length; j++) {
+        if (used[j]) continue
+        const candidate = rawRuns[j]
+        const sameSourceAlreadyPresent = group.some((g) => g.source === candidate.source)
+        if (sameSourceAlreadyPresent) {
+          // Only join on third-party corroboration: a real account can have
+          // BOTH Garmin->Strava and Hevy->Strava auto-posting independently for
+          // one physical workout (confirmed live), producing two genuine Strava
+          // rows for it. Matching against just one differently-sourced anchor
+          // already in the group is enough evidence they're the same event --
+          // requiring a match against every member would incorrectly demand the
+          // two same-source rows resemble each other directly, which they often
+          // won't (e.g. one carries real HR from the watch, the other doesn't).
+          if (group.some((g) => g.source !== candidate.source && isLikelyDuplicate(g, candidate))) {
+            group.push(candidate)
+            used[j] = true
+            addedAny = true
+          }
+        } else if (group.every((g) => isLikelyDuplicate(g, candidate))) {
+          // No existing member shares this source -- require it to look like a
+          // duplicate of EVERY current member, not just the first found, so a
+          // loose match against one early item can't transitively pull in
+          // something that doesn't actually belong with the rest of the group.
+          group.push(candidate)
+          used[j] = true
+          addedAny = true
+        }
       }
     }
-    if (matchIdx >= 0) {
-      used[matchIdx] = true
-      merged.push(mergeRunPair(rawRuns[i], rawRuns[matchIdx]))
-    } else {
-      merged.push(rawRuns[i])
-    }
+    merged.push(group.length > 1 ? mergeRunGroup(group) : rawRuns[i])
   }
   return merged
 }
