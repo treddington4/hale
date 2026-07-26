@@ -1,0 +1,6 @@
+# Test-only dependencies — deliberately separate from requirements.txt so the
+# runtime container image never installs pytest (see Dockerfile, which only
+# copies/installs requirements.txt).
+#
+# Install locally with:  pip install -r requirements.txt -r requirements-dev.txt
+pytest==8.3.4

@@ -30,3 +30,12 @@ packages = ["app", "app.sync", "app.coach", "app.accounts", "app.routes"]
 [build-system]
 requires = ["setuptools>=68"]
 build-backend = "setuptools.build_meta"
+
+[tool.pytest.ini_options]
+# pythonpath so `from app import stats` resolves when running pytest from the repo
+# root, rather than depending on pytest's implicit sys.path insertion.
+pythonpath = ["."]
+testpaths = ["tests"]
+# strict markers/config catch a typo'd @pytest.mark.xfail silently doing nothing —
+# several tests here rely on xfail(strict=True) as a real signal, not decoration.
+addopts = "--strict-markers --strict-config"
