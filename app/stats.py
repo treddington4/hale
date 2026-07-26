@@ -167,12 +167,14 @@ def run_detail(db, run_id: str, user_id: str = DEFAULT_USER_ID) -> dict | None:
     }
 
 
-def _all_runs(db, activity_type="Run", user_id: str = DEFAULT_USER_ID):
-    """activity_type accepts a single type ("Run", the default), a list (e.g. ["Run","Ride"]
+def _all_runs(db, activity_type="run", user_id: str = DEFAULT_USER_ID):
+    """activity_type accepts a single type ("run", the default), a list (e.g. ["run","ride"]
     for a duathlon goal spanning multiple activity types), or None/falsy for all types.
     Input types are normalized to canonical form before filtering (P4 backfill normalized
     all stored values), so callers can still pass the original spellings.
 
+    P6 changes default from "Run" to "run" (normalized form) — all downstream callers
+    already pass "Run" or list-of-types, and _normalize_activity_type("Run") → "run".
     Applies dedup.merge_duplicate_runs() to the query result — see that module's
     docstring for why. P3 landed dedup before normalization was complete; P4 backfilled
     stored values and broadens this filter to canonical families, so dedup now stops the
@@ -185,6 +187,19 @@ def _all_runs(db, activity_type="Run", user_id: str = DEFAULT_USER_ID):
         normalized_types = [_normalize_activity_type(t) for t in types]
         q = q.filter(Run.activity_type.in_(normalized_types))
     return merge_duplicate_runs(q.all())
+
+
+def _all_distance_activities(db, user_id: str = DEFAULT_USER_ID):
+    """All distance-based activities (run, ride, walk, hike, swim) for aggregates like
+    weekly/monthly mileage. Strength, yoga, and other activities have no meaningful
+    distance metric."""
+    return _all_runs(db, ["run", "ride", "walk", "hike", "swim"], user_id)
+
+
+def _all_activities(db, user_id: str = DEFAULT_USER_ID):
+    """All activities regardless of type, for aggregates like training load (TSS applies
+    to all activity types via P5's activity-family fallback factors)."""
+    return _all_runs(db, None, user_id)
 
 
 def _week_start(d):
@@ -299,20 +314,20 @@ def rolling_pace_trend(db, days: int = 90, window_days: int = 7, user_id: str = 
     return out
 
 
-def training_load_trend(db, weeks: int = 8, user_id: str = DEFAULT_USER_ID, activity_type: str = "Run"):
-    """Trailing 4 weeks vs. prior 4 weeks total mileage, using rolling 28-day windows
-    (not calendar-week buckets) so the current in-progress week doesn't bias the
-    comparison. Deliberately mileage-based, not an invented HR-based load score
-    presented as a real physiological measurement. `activity_type` (Phase 14) lets
-    this be computed per-activity (e.g. "Ride") rather than always assuming Run."""
+def training_load_trend(db, weeks: int = 8, user_id: str = DEFAULT_USER_ID, activity_type: str = None):
+    """Trailing 4 weeks vs. prior 4 weeks total TSS (training stress score), using
+    rolling 28-day windows (not calendar-week buckets) so the current in-progress week
+    doesn't bias the comparison. P6 change: now TSS-based and spans all activities
+    by default (`activity_type=None`), since P5 added TSS estimates for all families.
+    Can still scope to a specific type (e.g. "run", "ride") for per-activity analysis."""
     today = local_today(user_id)
     last28_start = (today - timedelta(days=27)).isoformat()
     prior28_start = (today - timedelta(days=55)).isoformat()
     prior28_end = (today - timedelta(days=28)).isoformat()
 
-    runs = _all_runs(db, activity_type, user_id)
-    last28 = sum(r.distance_mi or 0 for r in runs if r.date and last28_start <= r.date <= today.isoformat())
-    prior28 = sum(r.distance_mi or 0 for r in runs if r.date and prior28_start <= r.date <= prior28_end)
+    runs = _all_runs(db, activity_type, user_id) if activity_type else _all_activities(db, user_id)
+    last28 = sum(r.tss or 0 for r in runs if r.date and last28_start <= r.date <= today.isoformat())
+    prior28 = sum(r.tss or 0 for r in runs if r.date and prior28_start <= r.date <= prior28_end)
 
     pct_change = None
     if prior28 > 0:
@@ -322,8 +337,8 @@ def training_load_trend(db, weeks: int = 8, user_id: str = DEFAULT_USER_ID, acti
         direction = "up" if pct_change > 5 else ("down" if pct_change < -5 else "steady")
 
     return {
-        "last28DaysMiles": round(last28, 2),
-        "prior28DaysMiles": round(prior28, 2),
+        "last28DaysTSS": round(last28, 1),
+        "prior28DaysTSS": round(prior28, 1),
         "pctChange": pct_change,
         "direction": direction,
     }
@@ -497,7 +512,10 @@ def dashboard_summary(db, user_id: str = DEFAULT_USER_ID) -> dict:
     """Everything the Home tab's stat-card grid needs, in one call. Moved here from
     main.py's dashboard_summary endpoint so the cached and live-fallback paths (see
     main.py's dashboard cache, keyed off _record_sync) can never compute this two
-    different ways — one function, one meaning, matching this module's own discipline."""
+    different ways — one function, one meaning, matching this module's own discipline.
+
+    P6 change: trainingLoad and headerStats now span all activity types (TSS applies
+    to all via P5), while mileage/pace metrics stay distance/run-scoped."""
     return {
         "weeklyMileage": weekly_mileage(db, weeks=12, user_id=user_id),
         "trainingLoad": training_load_trend(db, user_id=user_id),
