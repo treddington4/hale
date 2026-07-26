@@ -1,15 +1,32 @@
 #!/usr/bin/env python3
 """P7b: Side-by-side Activity/STI migration + validation script.
 
+SUPERSEDED for the actual fix: the sti_type backfill now lives in
+app/models.py's _migrate_backfill_sti_type(), which runs inside init_db() on
+every start. The bug this script was meant to pre-empt reached production
+anyway, precisely because this script was validated but never run — an
+out-of-band script only helps if someone remembers to execute it, whereas a
+migration in init_db() cannot be forgotten and also fixes every other
+deployment of this app. This script is kept as a verification tool: it proves a
+full-database copy round-trips losslessly, which the in-place UPDATE doesn't
+demonstrate on its own.
+
 Standalone — NOT wired into app/models.py's init_db(). Creates a fresh copy of
 a source SQLite DB (a *copy* of production, never the live file itself) at
 --dest, copying every row from every table byte-for-byte EXCEPT `runs.sti_type`,
-which gets backfilled from each row's already-normalized `activity_type` via
-app.stats.activity_family() (P2/P5's canonical family mapping). Production's
-existing sti_type column is all-NULL today: SQLite's ALTER TABLE ADD COLUMN
+which is set to STI_TYPE_RUN ("run") for every row.
+
+It originally backfilled each row's real activity *family* here (ride/walk/…)
+via stats.activity_family(). That was a latent bug and is corrected above:
+`Run` is the only concrete subclass, and every sync path constructs a `Run(...)`
+whatever the activity really is, so a stored ride carries sti_type='run'. A
+per-family value would make `db.get(Run, id)` miss those rows and the sync would
+attempt a duplicate INSERT — see _migrate_backfill_sti_type()'s docstring.
+
+Production's sti_type column was all-NULL: SQLite's ALTER TABLE ADD COLUMN
 (see models.py's _migrate_add_missing_columns) only sets a default for rows
 inserted after the column existed — it never backfills rows that were already
-there, so every one of the 554 real production rows currently has sti_type=NULL.
+there, so every one of the 554 real production rows had sti_type=NULL.
 
 Safety:
   - --source is opened via SQLite's `mode=ro` URI, a real driver-level guarantee
@@ -45,13 +62,11 @@ import sqlite3
 import sys
 from pathlib import Path
 
-# Reuse P2/P5's canonical activity-family mapping rather than reimplementing it
-# here — CLAUDE.md's "extending stats.py is right, duplicating it is a defect."
 # Safe to import: app.models builds a SQLAlchemy `engine` at module scope, but
 # create_engine() is lazy and never touches disk until a connection is actually
 # opened, which this script never does through the ORM.
 sys.path.insert(0, str(Path(__file__).resolve().parent.parent))
-from app.stats import activity_family  # noqa: E402
+from app.models import STI_TYPE_RUN  # noqa: E402
 
 NUMERIC_TYPE_HINTS = ("INT", "REAL", "FLOA", "DOUB", "NUM", "DEC")
 
@@ -111,13 +126,12 @@ def copy_database(source_path: str, dest_path: str) -> None:
         insert_sql = f'INSERT INTO "{table}" ({col_list}) VALUES ({placeholders})'
 
         sti_idx = cols.index("sti_type") if table == "runs" and "sti_type" in cols else None
-        atype_idx = cols.index("activity_type") if table == "runs" and "activity_type" in cols else None
 
         rows_out = []
         for row in src.execute(f'SELECT * FROM "{table}"'):
             values = list(row)
-            if sti_idx is not None and atype_idx is not None:
-                values[sti_idx] = activity_family(values[atype_idx])
+            if sti_idx is not None:
+                values[sti_idx] = STI_TYPE_RUN
             rows_out.append(values)
 
         if rows_out:
@@ -190,10 +204,9 @@ def compare_databases(source_path: str, dest_path: str) -> list:
             for c in compare_cols:
                 if src_row[c] != dst_row[c]:
                     mismatches.append(f"[runs] id={rid} column={c} differs: source={src_row[c]!r} dest={dst_row[c]!r}")
-            expected_sti = activity_family(src_row["activity_type"])
-            if dst_row["sti_type"] != expected_sti:
+            if dst_row["sti_type"] != STI_TYPE_RUN:
                 mismatches.append(
-                    f"[runs] id={rid} sti_type mismatch: expected={expected_sti!r} got={dst_row['sti_type']!r}"
+                    f"[runs] id={rid} sti_type mismatch: expected={STI_TYPE_RUN!r} got={dst_row['sti_type']!r}"
                 )
 
     src.close()

@@ -729,6 +729,9 @@ def init_db():
     os.makedirs(os.path.dirname(DB_PATH), exist_ok=True)
     Base.metadata.create_all(engine)
     _migrate_add_missing_columns()
+    # Must run immediately after the ALTER TABLE that creates sti_type, and before
+    # anything below touches `runs` through the ORM — see its docstring.
+    _migrate_backfill_sti_type()
     _migrate_daily_steps_composite_pk()
     _migrate_sync_meta_to_user_keys()
     _backfill_detail_synced_at()
@@ -767,6 +770,44 @@ def _migrate_add_missing_columns():
                     col_type = "TEXT" if isinstance(col.type, (String, Text)) else \
                         "INTEGER" if isinstance(col.type, (Integer, Boolean)) else "REAL"
                     conn.exec_driver_sql(f"ALTER TABLE {table_name} ADD COLUMN {col.name} {col_type}")
+        conn.commit()
+
+
+def _migrate_backfill_sti_type():
+    """P7a added `sti_type` as the single-table-inheritance discriminator, with `Run`
+    as a polymorphic subclass (polymorphic_identity="run"). What that quietly means:
+    SQLAlchemy appends `WHERE sti_type = 'run'` to EVERY `db.query(Run)`/`db.get(Run, ...)`
+    in the codebase, and refuses to instantiate any row whose discriminator is NULL at
+    all (`db.query(Activity).all()` raises InvalidRequestError outright, it does not
+    just skip the row).
+
+    _migrate_add_missing_columns' ALTER TABLE ADD COLUMN only sets a value for rows
+    inserted *after* the column existed — it never backfills rows already there. So
+    every pre-P7a row kept sti_type=NULL and became invisible to the ORM: confirmed in
+    production, where all 554 rows were NULL and `GET /api/activities?all=true` returned
+    a literal empty list while the raw table was fully populated. It also broke the
+    sync write path (a `db.get(Run, id)` miss on an existing row makes the sync try a
+    fresh INSERT, hitting `UNIQUE constraint failed: runs.id`) and pipeline.py's PMC
+    recompute (`db.query(Run.date, Run.tss)` returned 0 rows and early-returned).
+
+    Backfills 'run' for EVERY row rather than each row's real activity family, which is
+    the counterintuitive-but-correct choice: `Run` is currently the only concrete
+    subclass, and every write path builds a `Run(...)` regardless of what the activity
+    actually is (strava.py, garmin_sync.py, hevy_sync.py, garmin_import.py all do this),
+    so a freshly-synced *ride* is stored with sti_type='run' today. Backfilling a ride
+    row as 'ride' would therefore desync stored rows from what the write path produces
+    and reintroduce the exact duplicate-INSERT crash above for every non-run activity.
+    Nothing is lost by this: sti_type is never used for filtering anywhere — stats.py
+    filters on the real `activity_type` column — so the discriminator is pure ORM
+    plumbing. When genuine Ride/Walk/Swim subclasses land, that change must update the
+    write paths and this backfill together, in one commit, or it will resurrect this bug.
+
+    Idempotent (`WHERE sti_type IS NULL`), raw SQL (must not depend on the very ORM
+    loading it repairs), and runs on every start so a NULL can never silently persist."""
+    with engine.connect() as conn:
+        conn.exec_driver_sql(
+            "UPDATE runs SET sti_type = ? WHERE sti_type IS NULL", (STI_TYPE_RUN,)
+        )
         conn.commit()
 
 

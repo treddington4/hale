@@ -155,10 +155,14 @@ def _get_activities(start: str | None = None, end: str | None = None, all_time: 
                      user_id: str = None):
     """Core logic for querying activities (runs, rides, etc.) — shared by both
     /api/activities (P7d primary) and /api/runs (legacy alias for backward compatibility).
-    P7d note: Uses Run queries (not Activity directly) for now since production's sti_type
-    discriminator is still NULL until P7b migration is applied. Run queries work fine with
-    NULL discriminators and will continue working after P7b (Run is a subclass of Activity).
-    After P7e completes and the frontend is fully migrated, this will switch to Activity."""
+
+    This docstring previously claimed "Run queries work fine with NULL discriminators."
+    That was wrong, and it was the belief that shipped the outage: a polymorphic subclass
+    query appends `WHERE sti_type = 'run'`, so against production's all-NULL discriminator
+    column this endpoint returned an empty list for every request while the table held 554
+    rows. models._migrate_backfill_sti_type() now guarantees the discriminator is populated
+    (see its docstring for the full story); querying Run here is safe *because of* that
+    migration, not because subclass queries tolerate NULLs."""
     db = SessionLocal()
     try:
         q = db.query(Run).filter(owned_by(Run.user_id, user_id))
