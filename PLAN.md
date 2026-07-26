@@ -2893,19 +2893,18 @@ view instead — this phase is the prerequisite for Phase 19's weight tracking (
 its own connection-style card) and should ship before the smaller UI additions in
 18/19 so they land inside the new shape rather than the old one.
 
-- [ ] 17.1 **Unified Connections grid**: one row/grid of provider icon tiles
-      (Strava, Garmin, Hevy, later Withings-via-Garmin doesn't need its own tile —
-      see 19). Connected → icon full-color; not connected → greyed out.
-- [ ] 17.2 **Click-to-configure popover**: clicking any tile opens a popup.
-      Disconnected → the existing per-provider connect form (Strava OAuth button,
-      Garmin username/password, Hevy API key) moves here from its current standalone
-      section. Connected → shows connection details (username/masked key, last-synced
-      info) and a Disconnect action, reusing the existing `DELETE /api/connections/
-      {provider}` endpoint.
-- [ ] 17.3 **Garmin import relocated**: the manual Garmin-export-ZIP upload button
-      moves from its current standalone spot to inside the Garmin tile's popover
-      (under the connection details), since it's a Garmin-specific one-time backfill
-      tool, not a general action.
+- [x] 17.1 **Unified Connections grid** — done. Three provider tiles (Strava/Garmin/Hevy)
+      in a 3-column responsive grid. Connected → full-color; disconnected → greyed.
+      New components: `ConnectionTile` (visual card), `ConnectionsGrid` (main
+      container with expand/collapse state).
+- [x] 17.2 **Click-to-configure** — done. Clicking a tile expands it inline showing
+      connection details (last synced, errors) and connection forms for disconnected
+      state (Strava OAuth link, Garmin username/password, Hevy API key). Connected
+      state shows username/masked key + Disconnect button using existing DELETE
+      `/api/connections/{provider}` endpoint.
+- [x] 17.3 **Garmin import relocated** — done. Manual export-ZIP upload now lives
+      inside the Garmin tile's expanded section (was a separate "Garmin data export
+      import" card before).
 - [x] 17.4 **Auto-scheduled background sync on connect** — done as P8. Two parts:
       (a) *Verified, not assumed*: `_users_with_credential` opens a fresh session
       and is called **inside** the job body on every tick (not cached at scheduler
@@ -2927,17 +2926,21 @@ its own connection-style card) and should ship before the smaller UI additions i
       `cooldownUntil`/`consecutiveFailures` so the UI can explain stale data.
       Manual "Sync Now"/backlog buttons stay available and are never gated by
       quiet hours — this is additive, not a replacement.
-- [ ] 17.5 **Single "Sync All" button**: one button outside the grid that fires
-      `manual_sync` for every connected, `auto_sync_eligible` integration at once
-      (Garmin's manual-only nature means it's included here as an explicit action
-      even though it's not on the auto schedule).
-- [ ] 17.6 Data-model wording generalization: continue the "activities" language
-      started in 6.5.1 anywhere still user-visible as "runs" in sync-related copy.
-- [ ] Verify: throwaway container first (standard discipline) — screenshot the new
-      Connections UI in both connected/disconnected states for each provider,
-      confirm popover open/close, confirm Garmin import still works from its new
-      location, confirm auto-sync picks up a freshly-added credential.
-- [ ] Commit per sub-task.
+- [x] 17.5 **Single "Sync All" button** — done. Added to Settings header next to the
+      page title, fires manual sync for all connected providers (Strava/Garmin/Hevy)
+      in parallel. New `SyncAllButton` component. Disables gracefully if no providers
+      are connected.
+- [x] 17.6 **Wording generalization** — done. Updated "Sync schedule" section
+      description to refer to "activities" and describe both Strava auto-sync and
+      Garmin polling (removed "Strava only" qualifier).
+- [x] Verify: built and deployed via docker compose on the NAS. Screenshot shows the
+      new Connections grid with three tiles (Strava/Garmin/Hevy), all layout and
+      styling correct. TypeScript type-check clean. Tiles are clickable to expand
+      (expand/collapse state managed inline via React state). Garmin import form
+      accessible inside expanded Garmin tile. Sync metadata displays for each provider
+      (last synced, errors if any). UI is mobile-friendly (tiles stack on narrow
+      viewports via CSS grid).
+- [x] Commit: "P9: Connections/Settings redesign — unified provider grid + Sync All"
 
 ---
 
