@@ -8,6 +8,16 @@ from datetime import datetime, timezone
 import os
 import uuid
 
+# P7a: STI discriminator values for activity families (must match P2's canonical types)
+STI_TYPE_RUN = "run"
+STI_TYPE_RIDE = "ride"
+STI_TYPE_STRENGTH = "strength"
+STI_TYPE_WALK = "walk"
+STI_TYPE_HIKE = "hike"
+STI_TYPE_SWIM = "swim"
+STI_TYPE_YOGA = "yoga"
+STI_TYPE_OTHER = "other"
+
 DB_PATH = os.environ.get("DB_PATH", "/data/runlog.db")
 engine = create_engine(f"sqlite:///{DB_PATH}", connect_args={"check_same_thread": False})
 SessionLocal = sessionmaker(bind=engine)
@@ -43,12 +53,22 @@ def owned_by(column, user_id: str):
     return column == user_id
 
 
-class Run(Base):
+class Activity(Base):
+    """P7a: Base class for all activity types using single-table inheritance (STI).
+    All rows live in the `runs` table; `sti_type` discriminator identifies the subclass.
+    Keep backward-compatible: existing "Run" rows implicitly have sti_type="run"."""
     __tablename__ = "runs"
+
+    # STI discriminator
+    sti_type = Column(String, default=STI_TYPE_RUN)
+    __mapper_args__ = {
+        "polymorphic_identity": "activity",
+        "polymorphic_on": sti_type,
+    }
 
     id = Column(String, primary_key=True)  # e.g. "strava_19268494216" or "garmin_..."
     user_id = Column(String, ForeignKey("users.id", ondelete="CASCADE"), nullable=True)  # see owned_by() — NULL on pre-migration rows, treated as "default"
-    source = Column(String)                # "strava" | "garmin"
+    source = Column(String)                # "strava" | "garmin" | "hevy"
     activity_type = Column(String, default="Run")  # raw source activity type: "Run", "Ride", "Walk", "Hike", ...
     date = Column(String)                  # YYYY-MM-DD
     start_time = Column(String)            # HH:MM local
@@ -113,6 +133,14 @@ class Run(Base):
     # workout on the next auto-sync pass" marker and the pointer needed for a
     # manual revert later (which Garmin activity to delete-and-restore).
     garmin_enriched_activity_id = Column(Integer, nullable=True)
+
+
+class Run(Activity):
+    """P7a: Subclass of Activity for backward compatibility. All existing code using Run
+    continues to work; new code can use Activity for polymorphic queries over all types."""
+    __mapper_args__ = {
+        "polymorphic_identity": STI_TYPE_RUN,
+    }
 
 
 class DailySteps(Base):
