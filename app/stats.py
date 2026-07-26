@@ -148,12 +148,21 @@ def run_detail(db, run_id: str, user_id: str = DEFAULT_USER_ID) -> dict | None:
 def _all_runs(db, activity_type="Run", user_id: str = DEFAULT_USER_ID):
     """activity_type accepts a single type ("Run", the default — every existing caller
     passes a plain string and is unaffected), a list (e.g. ["Run","Ride"] for a duathlon
-    goal spanning multiple activity types), or None/falsy for all types."""
+    goal spanning multiple activity types), or None/falsy for all types.
+
+    Applies dedup.merge_duplicate_runs() to the query result — see that module's
+    docstring for why. Landed here (P3) while the exact-match type filter above still
+    hides most cross-source duplicates (their raw spelling doesn't match), so this is a
+    verifiable no-op for the "Run"-default case today; P4 broadens the filter to
+    canonical families, at which point dedup (already proven correct here) starts doing
+    its intended job instead of the exact-match filter accidentally doing it."""
+    from .dedup import merge_duplicate_runs
+
     q = db.query(Run).filter(owned_by(Run.user_id, user_id))
     if activity_type:
         types = [activity_type] if isinstance(activity_type, str) else list(activity_type)
         q = q.filter(Run.activity_type.in_(types))
-    return q.all()
+    return merge_duplicate_runs(q.all())
 
 
 def _week_start(d):
