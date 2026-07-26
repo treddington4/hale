@@ -4,7 +4,7 @@ from datetime import datetime, timedelta, timezone
 
 from fastapi import APIRouter, HTTPException, Request, Query, Depends
 
-from ..models import SessionLocal, DailySteps, Run, DailyMetrics, owned_by
+from ..models import SessionLocal, DailySteps, Run, Activity, DailyMetrics, owned_by
 from ..accounts import auth
 from ..util import local_today
 
@@ -81,6 +81,15 @@ def get_wellness(days: int = 90, start: str = None, end: str = None, all_time: b
             "lightSleepSeconds": r.light_sleep_seconds,
             "remSleepSeconds": r.rem_sleep_seconds,
             "awakeSleepSeconds": r.awake_sleep_seconds,
+            # Phase 24.3/24.2 — first surfaced anywhere in the UI here (previously
+            # only fed into the Phase 27 daily coach report's prose). Same DailySteps
+            # rows this endpoint already queries, so this is additive-only.
+            "racePredict5kSec": r.race_predict_5k_sec,
+            "racePredict10kSec": r.race_predict_10k_sec,
+            "racePredictHalfMarathonSec": r.race_predict_half_marathon_sec,
+            "racePredictMarathonSec": r.race_predict_marathon_sec,
+            "trainingReadinessScore": r.training_readiness_score,
+            "trainingReadinessLevel": r.training_readiness_level,
         } for r in rows]
     finally:
         db.close()
@@ -113,7 +122,10 @@ def get_sleep_stages(date: str = None, user_id: str = Depends(auth.current_user_
 
 
 # ---------- Runs CRUD ----------
-def _run_to_dict(r: Run):
+def _run_to_dict(r: Activity | Run):
+    """Convert an Activity (or Run subclass) to API response dict. P7d: accepts Activity
+    base class since /api/activities now queries Activity polymorphically; Run type hint
+    kept for backward compatibility with sync/coach code that still uses Run."""
     return {
         "id": r.id, "source": r.source, "activityType": r.activity_type, "date": r.date, "startTime": r.start_time,
         "name": r.name, "distanceMi": r.distance_mi, "movingTimeSec": r.moving_time_sec,
@@ -139,14 +151,14 @@ def _run_to_dict(r: Run):
 DEFAULT_RUNS_WINDOW_DAYS = 90
 
 
-@router.get("/api/runs")
-def get_runs(start: str | None = None, end: str | None = None, all_time: bool = Query(False, alias="all"),
-             user_id: str = Depends(auth.current_user_id)):
-    """Windowed by default (Phase 0.5 — this used to return every activity ever
-    synced unconditionally, a multi-MB payload on every page load). `all=true`
-    bypasses the window entirely — used by callers that need true all-time totals
-    (e.g. the Home tab's exact stat-strip numbers, see web/src/hooks/useRuns.ts)
-    rather than trying to guess a "big enough" default range for every caller."""
+def _get_activities(start: str | None = None, end: str | None = None, all_time: bool = False,
+                     user_id: str = None):
+    """Core logic for querying activities (runs, rides, etc.) — shared by both
+    /api/activities (P7d primary) and /api/runs (legacy alias for backward compatibility).
+    P7d note: Uses Run queries (not Activity directly) for now since production's sti_type
+    discriminator is still NULL until P7b migration is applied. Run queries work fine with
+    NULL discriminators and will continue working after P7b (Run is a subclass of Activity).
+    After P7e completes and the frontend is fully migrated, this will switch to Activity."""
     db = SessionLocal()
     try:
         q = db.query(Run).filter(owned_by(Run.user_id, user_id))
@@ -157,10 +169,30 @@ def get_runs(start: str | None = None, end: str | None = None, all_time: bool = 
                 q = q.filter(Run.date >= start)
             if end:
                 q = q.filter(Run.date <= end)
-        runs = q.order_by(Run.date.desc()).all()
-        return [_run_to_dict(r) for r in runs]
+        activities = q.order_by(Run.date.desc()).all()
+        return [_run_to_dict(a) for a in activities]
     finally:
         db.close()
+
+
+@router.get("/api/activities")
+def get_activities(start: str | None = None, end: str | None = None, all_time: bool = Query(False, alias="all"),
+                   user_id: str = Depends(auth.current_user_id)):
+    """P7d primary endpoint: all activities (runs, rides, strength, etc.), replacing
+    the runs-only endpoint. Windowed by default (Phase 0.5 — this used to return every
+    activity ever synced unconditionally, a multi-MB payload on every page load).
+    `all=true` bypasses the window entirely — used by callers that need true all-time
+    totals (e.g. the Home tab's exact stat-strip numbers) rather than trying to guess a
+    "big enough" default range for every caller."""
+    return _get_activities(start, end, all_time, user_id)
+
+
+@router.get("/api/runs")
+def get_runs(start: str | None = None, end: str | None = None, all_time: bool = Query(False, alias="all"),
+             user_id: str = Depends(auth.current_user_id)):
+    """P7d legacy alias for backward compatibility. See /api/activities (the primary
+    endpoint). Both endpoints return identical data and will coexist for one release."""
+    return _get_activities(start, end, all_time, user_id)
 
 
 @router.patch("/api/runs/{run_id}")
