@@ -51,6 +51,27 @@ def _normalize_activity_type(t: str) -> str:
         return "yoga"
     return t
 
+
+def activity_family(activity_type: str) -> str:
+    """Map an activity type to its family for TSS fallback factor lookup.
+    Matches the frontend's runs.ts activityFamily() logic."""
+    t = (activity_type or "").lower()
+    if "run" in t:
+        return "run"
+    if "strength" in t or "weight" in t:
+        return "strength"
+    if "ride" in t or "cycl" in t or "bik" in t:
+        return "ride"
+    if "walk" in t:
+        return "walk"
+    if "hik" in t:
+        return "hike"
+    if "swim" in t:
+        return "swim"
+    if "yoga" in t:
+        return "yoga"
+    return "other"
+
 PACE_MIN_SEC_PER_MI = 240
 PACE_MAX_SEC_PER_MI = 2400
 MIN_DISTANCE_MI = 0.1
@@ -785,7 +806,7 @@ def backfill_run_metrics(db, user_id: str = DEFAULT_USER_ID) -> int:
     threshold_hr = config.threshold_hr if config else None
     runs = db.query(Run).filter(owned_by(Run.user_id, user_id)).all()
     for r in runs:
-        r.tss = compute_tss(r.moving_time_sec, r.avg_hr, threshold_hr, r.suggested_type)
+        r.tss = compute_tss(r.moving_time_sec, r.avg_hr, threshold_hr, r.suggested_type, activity_family(r.activity_type))
         r.efficiency_factor = compute_efficiency_factor(r.avg_pace_sec_per_mi, r.avg_hr)
     db.commit()
     return len(runs)

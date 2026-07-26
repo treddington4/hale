@@ -32,7 +32,7 @@ from ..models import (
 from .weather import get_historical_weather
 from ..util import classify_run_type, detect_intervals, local_today, compute_tss, compute_efficiency_factor
 from .. import stats
-from ..stats import _normalize_activity_type
+from ..stats import _normalize_activity_type, activity_family
 
 log = logging.getLogger("runlog")
 
@@ -1286,7 +1286,7 @@ def _process_activity(act: dict, client, db, user_id: str) -> bool:
     # Phase 6.1 — computed once at sync time, same discipline as GAP/run-type above.
     training_config = db.get(UserTrainingConfig, user_id)
     threshold_hr = training_config.threshold_hr if training_config else None
-    run.tss = compute_tss(run.moving_time_sec, run.avg_hr, threshold_hr, run.suggested_type)
+    run.tss = compute_tss(run.moving_time_sec, run.avg_hr, threshold_hr, run.suggested_type, activity_family(run.activity_type))
     run.efficiency_factor = compute_efficiency_factor(run.avg_pace_sec_per_mi, run.avg_hr)
 
     # Phase 6.3 — only fills in gear_id if unset, never overwrites a manual reassignment.

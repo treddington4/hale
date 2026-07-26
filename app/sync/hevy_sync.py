@@ -24,7 +24,7 @@ import requests
 from ..models import SessionLocal, Run, ProviderCredential, get_sync_meta, user_key, owned_by
 from ..util import user_timezone, compute_tss
 from .. import stats
-from ..stats import _normalize_activity_type
+from ..stats import _normalize_activity_type, activity_family
 
 log = logging.getLogger("runlog")
 
@@ -140,11 +140,10 @@ def _upsert_workout(db, workout: dict, user_id: str, tz_name: str) -> None:
     run.notes = workout.get("description") or None
     run.exercise_sets_json = json.dumps(_exercise_sets_from_workout(workout))
 
-    # Same call as Strava/Garmin's own sync paths -- a no-op here (no avg_hr and
-    # no FALLBACK_INTENSITY_FACTOR bucket for these suggested_type values), but
-    # computed uniformly rather than special-cased away, so this doesn't silently
-    # miss out if a future change makes it produce a real value.
-    run.tss = compute_tss(run.moving_time_sec, run.avg_hr, None, run.suggested_type)
+    # Same call as Strava/Garmin's own sync paths — P5 added FALLBACK_INTENSITY_FACTOR
+    # buckets for strength types + family fallbacks, so Hevy workouts get TSS estimates
+    # based on their suggested_type ("Full Body", "Upper Body", etc.).
+    run.tss = compute_tss(run.moving_time_sec, run.avg_hr, None, run.suggested_type, activity_family(run.activity_type))
     stats.assign_default_gear(db, run, user_id)
 
     db.merge(run)

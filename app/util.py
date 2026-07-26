@@ -120,27 +120,40 @@ def classify_run_type(distance_mi, avg_pace_sec_per_mi, splits, avg_hr=None):
     return "Easy"
 
 
-# Phase 6.1 — fixed intensity-factor-squared-style estimate per classify_run_type
-# bucket, used only when a real threshold_hr isn't available (see compute_tss).
-# Same duration * IF^2 * 100 shape as real hrTSS, just with a documented fixed IF
-# per bucket instead of one computed from actual HR-vs-threshold data.
+# Phase 6.1/5 — fixed intensity-factor-squared-style estimate, used only when a real
+# threshold_hr isn't available (see compute_tss). Same duration * IF^2 * 100 shape as
+# real hrTSS, just with a documented fixed IF per bucket instead of one computed from
+# actual HR-vs-threshold data. P5 extends from run-type keys to activity-family + run-type
+# keys so non-run activities get TSS estimates: strength workouts ~0.75-0.80, yoga/mobility
+# ~0.50, walk ~0.40, cycling/swimming/hiking ~0.65-0.75.
 FALLBACK_INTENSITY_FACTOR = {
+    # Run types
     "Recovery": 0.60, "Easy": 0.70, "Tempo": 0.85, "Interval": 0.95, "Long Run": 0.75,
+    # Strength types (full/upper/lower/push/pull/legs/core)
+    "Full Body": 0.78, "Upper Body": 0.75, "Lower Body": 0.75, "Push": 0.78, "Pull": 0.75,
+    "Legs": 0.80, "Core": 0.60, "Other": 0.65,
+    # Activity family fallbacks (when no suggested_type)
+    "run": 0.70, "strength": 0.75, "ride": 0.70, "walk": 0.40, "hike": 0.65,
+    "swim": 0.75, "yoga": 0.50, "other": 0.60,
 }
 
 
-def compute_tss(moving_time_sec, avg_hr=None, threshold_hr=None, suggested_type=None) -> float | None:
+def compute_tss(moving_time_sec, avg_hr=None, threshold_hr=None, suggested_type=None, activity_family=None) -> float | None:
     """hrTSS (`duration_hr * (avg_hr/threshold_hr)^2 * 100`, the standard
     TrainingPeaks-style formula) when both a real avg_hr and threshold_hr exist;
     otherwise falls back to the same duration*(IF^2)*100 shape using a fixed
-    intensity factor per classify_run_type bucket (FALLBACK_INTENSITY_FACTOR) — a
-    documented v1 approximation, not a full grade-adjusted-pace TSS model."""
+    intensity factor from FALLBACK_INTENSITY_FACTOR — either a specific
+    suggested_type (e.g. "Easy", "Tempo", "Full Body") or an activity family
+    (e.g. "strength", "walk", "ride") as documented v1 approximation."""
     if not moving_time_sec:
         return None
     duration_hr = moving_time_sec / 3600
     if avg_hr and threshold_hr:
         return round(duration_hr * (avg_hr / threshold_hr) ** 2 * 100, 1)
+    # Try suggested_type first (run-type or strength-type classification), fall back to family
     intensity_factor = FALLBACK_INTENSITY_FACTOR.get(suggested_type)
+    if intensity_factor is None and activity_family:
+        intensity_factor = FALLBACK_INTENSITY_FACTOR.get(activity_family.lower())
     if intensity_factor is None:
         return None
     return round(duration_hr * (intensity_factor ** 2) * 100, 1)
