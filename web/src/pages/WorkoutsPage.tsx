@@ -1,4 +1,5 @@
 import { useState } from "react"
+import { useNavigate } from "react-router-dom"
 import type { Workout } from "@/lib/api"
 import { useWorkouts, useRecoverySessions, useRecoveryTools, useWorkoutMutations } from "@/hooks/useWorkouts"
 import { todayLocalDateString } from "@/lib/format"
@@ -17,6 +18,7 @@ type Item =
   | ({ _kind: "recovery" } & import("@/lib/api").RecoverySession)
 
 export function WorkoutsPage() {
+  const navigate = useNavigate()
   const { data: workouts } = useWorkouts()
   const { data: recoverySessions } = useRecoverySessions()
   const { data: recoveryTools } = useRecoveryTools()
@@ -63,6 +65,17 @@ export function WorkoutsPage() {
             setDialogOpen(true)
           }}
           onDelete={() => deleteWorkout.mutate(item.id)}
+          onCritique={
+            item.linkedRunId
+              ? () =>
+                  navigate("/chat", {
+                    state: {
+                      prefillActivityId: item.linkedRunId,
+                      prefillText: `Critique my ${item.activityType || "workout"} from ${item.scheduledDate}.`,
+                    },
+                  })
+              : undefined
+          }
         />
       )
     }

@@ -128,11 +128,13 @@ export function WorkoutCard({
   workout,
   onEdit,
   onDelete,
+  onCritique,
   preview = false,
 }: {
   workout: Workout
   onEdit?: () => void
   onDelete?: () => void
+  onCritique?: () => void
   // Phase 14.6 — renders a generator dry-run result (no real id/createdAt) the
   // same way a real card renders, minus any action that assumes a persisted row
   // (Start/Edit/Delete all need a real workout id to act on).
@@ -182,6 +184,11 @@ export function WorkoutCard({
           {canStart && (
             <Button asChild size="sm" className="h-auto py-1">
               <Link to={`/workouts/${workout.id}/run`}>Start</Link>
+            </Button>
+          )}
+          {workout.status === "completed" && workout.linkedRunId && onCritique && (
+            <Button variant="link" size="sm" className="h-auto p-0" onClick={onCritique}>
+              Critique
             </Button>
           )}
           <Button variant="link" size="sm" className="h-auto p-0" onClick={onEdit}>

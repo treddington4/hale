@@ -147,15 +147,40 @@ def is_plausible_hr(bpm, hr_floor) -> bool:
     return bpm is not None and bpm >= hr_floor
 
 
+def _linked_workout_for_run(db, run_id: str, user_id: str = DEFAULT_USER_ID) -> dict | None:
+    """Reverse lookup: find the Workout (if any) linked to this completed run via
+    linked_run_id. Returns None if no link exists. Deterministic ordering (order by
+    created_at DESC to get the most recent linked workout, never a bare .first()) so
+    if a run is somehow linked to multiple workouts, we get the most recent one.
+    P14: Used in run_detail to surface the prescribed workout for critique."""
+    from .models import Workout
+    workout = db.query(Workout).filter(
+        Workout.linked_run_id == run_id, owned_by(Workout.user_id, user_id)
+    ).order_by(Workout.created_at.desc()).first()
+    if not workout:
+        return None
+    return {
+        "id": workout.id,
+        "workoutType": workout.workout_type,
+        "activityType": workout.activity_type,
+        "targetDistanceMi": workout.target_distance_mi,
+        "targetDurationSec": workout.target_duration_sec,
+        "notes": workout.notes,
+        "status": workout.status,
+    }
+
+
 def run_detail(db, run_id: str, user_id: str = DEFAULT_USER_ID) -> dict | None:
     """Full single-run detail (splits, HR, notes) — shared by assistant.py's
     get_run_detail chat tool and the "ask coach about this activity" hidden context
     block (coach/core.py's get_activity_context_block), so both see identical data.
-    P7c: Use Activity for polymorphic query across all activity types."""
+    P7c: Use Activity for polymorphic query across all activity types.
+    P14: Includes linkedWorkout if this run was linked to a prescribed workout."""
     r = db.query(Activity).filter(Activity.id == run_id, owned_by(Activity.user_id, user_id)).first()
     if not r:
         return None
     hr_floor = get_hr_floor(db, user_id)
+    linked_workout = _linked_workout_for_run(db, run_id, user_id)
     return {
         "id": r.id, "date": r.date, "name": r.name, "activityType": r.activity_type,
         "distanceMi": r.distance_mi, "movingTimeSec": r.moving_time_sec,
@@ -165,6 +190,7 @@ def run_detail(db, run_id: str, user_id: str = DEFAULT_USER_ID) -> dict | None:
         "elevGainFt": r.elev_gain_ft, "avgCadence": r.avg_cadence,
         "type": r.type_override or r.suggested_type, "rpe": r.rpe, "notes": r.notes,
         "splits": json.loads(r.splits_json or "[]"),
+        "linkedWorkout": linked_workout,
     }
 
 
