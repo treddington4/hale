@@ -1,0 +1,48 @@
+# Standalone dev/test container — entirely separate from the production stack
+# (docker-compose.yml). Exists so verifying a change (running pytest, or a
+# one-off script comparing computed stats against real data) doesn't require
+# rebuilding the whole multi-stage prod image or reinstalling dependencies in a
+# fresh throwaway container every time.
+#
+# Start (only needs a rebuild when requirements.txt/requirements-dev.txt changes):
+#   docker compose -f docker-compose.dev.yml up -d --build
+#
+# Run tests (fast — no pip install, no image rebuild):
+#   docker exec runlog-dev pytest tests/ -v
+#
+# Run a one-off script against a READ-ONLY copy of the real production DB
+# (mounted at /data-prod — never write here; SQLAlchemy's DB_PATH must be
+# overridden per-invocation, e.g. `DB_PATH=/data-prod/runlog.db python3 script.py`):
+#   docker exec -e DB_PATH=/data-prod/runlog.db runlog-dev python3 some_script.py
+#
+# Run the live app for interactive manual testing, on port 8001, writing only
+# to its own throwaway scratch DB (/scratch-data/dev.db, in the runlog_dev_scratch
+# volume below) — NEVER the real production data:
+#   docker exec -d runlog-dev uvicorn app.main:app --host 0.0.0.0 --port 8001 --reload
+#   (then http://<nas-ip>:8001)
+services:
+  runlog-dev:
+    build:
+      context: .
+      dockerfile: Dockerfile.dev
+    container_name: runlog-dev
+    ports:
+      - "8001:8001"
+    volumes:
+      - .:/srv                              # live code, read-write — no rebuild needed to pick up edits
+      - runlog_runlog_data:/data-prod:ro     # real production DB, READ-ONLY, for verify-against-real-data scripts only
+      - runlog_dev_scratch:/scratch-data     # writable scratch DB for interactively running the app
+    environment:
+      - DB_PATH=/scratch-data/dev.db
+      - STRAVA_CLIENT_ID=${STRAVA_CLIENT_ID:-}
+      - STRAVA_CLIENT_SECRET=${STRAVA_CLIENT_SECRET:-}
+      - STRAVA_REDIRECT_URI=${STRAVA_REDIRECT_URI:-http://localhost:8001/auth/strava/callback}
+      - CLAUDE_CODE_OAUTH_TOKEN=${CLAUDE_CODE_OAUTH_TOKEN:-}
+      - ANTHROPIC_API_KEY=${ANTHROPIC_API_KEY:-}
+    command: tail -f /dev/null   # idle — exec in as needed, nothing auto-starts
+    restart: unless-stopped
+
+volumes:
+  runlog_runlog_data:
+    external: true
+  runlog_dev_scratch:

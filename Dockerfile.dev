@@ -1,0 +1,13 @@
+# Dev/test container — NOT the production image (see Dockerfile). Installs
+# dependencies once so pytest/verification scripts run via `docker exec` against
+# an already-warm container instead of a fresh `docker run --rm` reinstalling
+# ~70 packages from scratch every time. App code is bind-mounted at runtime
+# (see docker-compose.dev.yml), not copied in here, so editing a file takes
+# effect immediately with no rebuild — only rebuild this image when
+# requirements.txt/requirements-dev.txt changes.
+FROM python:3.12-slim
+
+WORKDIR /srv
+
+COPY requirements.txt requirements-dev.txt ./
+RUN pip install --no-cache-dir -r requirements.txt -r requirements-dev.txt
