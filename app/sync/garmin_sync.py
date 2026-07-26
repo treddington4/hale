@@ -32,6 +32,7 @@ from ..models import (
 from .weather import get_historical_weather
 from ..util import classify_run_type, detect_intervals, local_today, compute_tss, compute_efficiency_factor
 from .. import stats
+from ..stats import _normalize_activity_type
 
 log = logging.getLogger("runlog")
 
@@ -569,6 +570,57 @@ def _extract_sleep_stages(raw_sleep: dict) -> list:
     return segments
 
 
+def _bulk_sync_race_predictions(client, user_id: str, start_date: str, end_date: str, progress_cb=None) -> None:
+    """Race predictions (Phase 24.3) support a real date-range bulk fetch (up to
+    366 days per call, confirmed live) unlike every other wellness metric here, so
+    this is called once per _sync_daily_wellness invocation covering the whole
+    dates_to_sync span -- one call for N days, not N calls -- rather than folded
+    into the per-day loop below. Chunks into <=365-day windows for safety even
+    though normal usage (a volatile-window catch-up or the historical backfill)
+    should rarely if ever need more than one chunk."""
+    start = datetime.strptime(start_date, "%Y-%m-%d").date()
+    end = datetime.strptime(end_date, "%Y-%m-%d").date()
+    cursor = start
+    while cursor <= end:
+        chunk_end = min(cursor + timedelta(days=365), end)
+        try:
+            data = client.get_race_predictions(
+                startdate=cursor.isoformat(), enddate=chunk_end.isoformat(), _type="daily",
+            )
+        except Exception as e:
+            if _is_rate_limit_error(e):
+                raise
+            log.debug(f"garmin wellness sync: get_race_predictions failed for {cursor}..{chunk_end}: {e}")
+            cursor = chunk_end + timedelta(days=1)
+            continue
+
+        entries = data if isinstance(data, list) else [data] if isinstance(data, dict) else []
+        db = SessionLocal()
+        try:
+            updated = 0
+            for entry in entries:
+                date_str = entry.get("calendarDate")
+                if not date_str:
+                    continue
+                row = db.get(DailySteps, (date_str, user_id)) or DailySteps(date=date_str, user_id=user_id)
+                if entry.get("time5K") is not None:
+                    row.race_predict_5k_sec = entry["time5K"]
+                if entry.get("time10K") is not None:
+                    row.race_predict_10k_sec = entry["time10K"]
+                if entry.get("timeHalfMarathon") is not None:
+                    row.race_predict_half_marathon_sec = entry["timeHalfMarathon"]
+                if entry.get("timeMarathon") is not None:
+                    row.race_predict_marathon_sec = entry["timeMarathon"]
+                db.merge(row)
+                updated += 1
+            db.commit()
+            if progress_cb and updated:
+                progress_cb(f"Synced race predictions for {updated} day(s) ({cursor}..{chunk_end})")
+        finally:
+            db.close()
+        cursor = chunk_end + timedelta(days=1)
+
+
 def _sync_daily_wellness(client, user_id: str, days: int, progress_cb=None) -> int:
     """Resting HR / VO2max / sleep / HRV / respiration (respiration added Phase 24,
     for stats.readiness()), one row per day in DailySteps — deliberately scoped to
@@ -607,6 +659,9 @@ def _sync_daily_wellness(client, user_id: str, days: int, progress_cb=None) -> i
         db.close()
 
     log.debug(f"garmin wellness sync: {len(dates_to_sync)} day(s) need syncing (window {start}..{end})")
+
+    if dates_to_sync:
+        _bulk_sync_race_predictions(client, user_id, min(dates_to_sync), max(dates_to_sync), progress_cb)
 
     synced = 0
     for i, date_str in enumerate(dates_to_sync):
@@ -1197,7 +1252,7 @@ def _process_activity(act: dict, client, db, user_id: str) -> bool:
     run = existing or Run(id=run_id)
     run.user_id = user_id
     run.source = "garmin"
-    run.activity_type = activity_type
+    run.activity_type = _normalize_activity_type(activity_type)
     run.date = start_dt.strftime("%Y-%m-%d")
     run.start_time = start_dt.strftime("%H:%M")
     run.name = act.get("activityName", "Run")

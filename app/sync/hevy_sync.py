@@ -24,6 +24,7 @@ import requests
 from ..models import SessionLocal, Run, ProviderCredential, get_sync_meta, user_key, owned_by
 from ..util import user_timezone, compute_tss
 from .. import stats
+from ..stats import _normalize_activity_type
 
 log = logging.getLogger("runlog")
 
@@ -130,7 +131,7 @@ def _upsert_workout(db, workout: dict, user_id: str, tz_name: str) -> None:
     run = db.get(Run, run_id) or Run(id=run_id)
     run.user_id = user_id
     run.source = "hevy"
-    run.activity_type = "WeightTraining"
+    run.activity_type = _normalize_activity_type("WeightTraining")
     run.date = start_local.strftime("%Y-%m-%d")
     run.start_time = start_local.strftime("%H:%M")
     run.name = workout.get("title") or "Hevy Workout"

@@ -17,6 +17,7 @@ os.environ["DB_PATH"] = os.path.join(_TMP_DIR, "test.db")
 import pytest  # noqa: E402
 
 from app.models import Base, SessionLocal, engine, Run, User  # noqa: E402
+from app.stats import _normalize_activity_type  # noqa: E402
 
 TEST_USER_ID = "test_user"
 
@@ -79,7 +80,7 @@ def make_activity(db):
             id=id,
             user_id=TEST_USER_ID,
             source=source,
-            activity_type=activity_type,
+            activity_type=_normalize_activity_type(activity_type),
             date=date,
             start_time=start_time,
             name=overrides.pop("name", f"Test {activity_type}"),

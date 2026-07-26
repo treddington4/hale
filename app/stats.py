@@ -4,11 +4,12 @@ same question are always backed by identical logic — see CLAUDE.md's note on G
 being computed once in util.py and again in app.js (kept in sync by hand) for why a
 second drifting implementation of the same numbers is worth avoiding here.
 
-Note: like GET /api/runs, these functions query the raw `runs` table directly and do
-not apply app.js's client-side mergeDuplicateRuns() dedup — the ~3 known same-physical-
-run Strava+Garmin duplicate pairs (see STATUS.md) are counted once per source here, so
-aggregate totals may be marginally inflated versus what the merged UI shows. Same scope
-boundary as the existing /api/runs endpoint, not a new gap introduced by this module.
+Note: like GET /api/runs, these functions query the raw `runs` table directly, but
+apply dedup.merge_duplicate_runs() (P3+) to collapse cross-source duplicates — Strava
+and Garmin each write their own rows for the same physical run (confirmed: 135 dates
+carry both spellings), which dedup collapses into one per physical activity. This is
+identical to the client-side mergeDuplicateRuns() the frontend applies to /api/runs,
+so backend aggregates and merged UI counts are now in sync.
 """
 import json
 import logging
@@ -146,22 +147,22 @@ def run_detail(db, run_id: str, user_id: str = DEFAULT_USER_ID) -> dict | None:
 
 
 def _all_runs(db, activity_type="Run", user_id: str = DEFAULT_USER_ID):
-    """activity_type accepts a single type ("Run", the default — every existing caller
-    passes a plain string and is unaffected), a list (e.g. ["Run","Ride"] for a duathlon
-    goal spanning multiple activity types), or None/falsy for all types.
+    """activity_type accepts a single type ("Run", the default), a list (e.g. ["Run","Ride"]
+    for a duathlon goal spanning multiple activity types), or None/falsy for all types.
+    Input types are normalized to canonical form before filtering (P4 backfill normalized
+    all stored values), so callers can still pass the original spellings.
 
     Applies dedup.merge_duplicate_runs() to the query result — see that module's
-    docstring for why. Landed here (P3) while the exact-match type filter above still
-    hides most cross-source duplicates (their raw spelling doesn't match), so this is a
-    verifiable no-op for the "Run"-default case today; P4 broadens the filter to
-    canonical families, at which point dedup (already proven correct here) starts doing
-    its intended job instead of the exact-match filter accidentally doing it."""
+    docstring for why. P3 landed dedup before normalization was complete; P4 backfilled
+    stored values and broadens this filter to canonical families, so dedup now stops the
+    duplicates instead of the old exact-match filter doing it accidentally."""
     from .dedup import merge_duplicate_runs
 
     q = db.query(Run).filter(owned_by(Run.user_id, user_id))
     if activity_type:
         types = [activity_type] if isinstance(activity_type, str) else list(activity_type)
-        q = q.filter(Run.activity_type.in_(types))
+        normalized_types = [_normalize_activity_type(t) for t in types]
+        q = q.filter(Run.activity_type.in_(normalized_types))
     return merge_duplicate_runs(q.all())
 
 

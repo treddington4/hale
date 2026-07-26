@@ -10,6 +10,7 @@ from ..models import SessionLocal, Run, ProviderCredential, UserTrainingConfig, 
 from .weather import get_historical_weather
 from ..util import gap_sec_per_mi, classify_run_type, detect_intervals, decode_polyline, compute_tss, compute_efficiency_factor
 from .. import stats
+from ..stats import _normalize_activity_type
 
 # STRAVA_CLIENT_ID/SECRET are the OAuth *application's* credentials (registered once per
 # self-hosted deployment at strava.com) — infrastructure config, not a per-user secret.
@@ -315,7 +316,7 @@ def _process_activity(act: dict, headers: dict, db, user_id: str) -> bool:
     run = existing or Run(id=run_id)
     run.user_id = user_id
     run.source = "strava"
-    run.activity_type = activity_type
+    run.activity_type = _normalize_activity_type(activity_type)
     run.date = start_dt.strftime("%Y-%m-%d")
     run.start_time = start_dt.strftime("%H:%M")
     run.name = act.get("name", "Run")

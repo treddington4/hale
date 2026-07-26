@@ -204,6 +204,17 @@ class DailySteps(Base):
     avg_stress_level = Column(Integer, nullable=True)
     max_stress_level = Column(Integer, nullable=True)
 
+    # Phase 24.3 — race predictions (get_race_predictions()), for a real trend line
+    # (user wants VO2max/race-prediction trends, not just a live snapshot). Seconds,
+    # matching Garmin's own unit. Unlike every other metric here, this endpoint
+    # supports a real date-range bulk fetch (up to 366 days per call) instead of
+    # one-call-per-day, so historical backfill is cheap regardless of how far back
+    # it goes -- populated separately from the per-day wellness loop below.
+    race_predict_5k_sec = Column(Integer, nullable=True)
+    race_predict_10k_sec = Column(Integer, nullable=True)
+    race_predict_half_marathon_sec = Column(Integer, nullable=True)
+    race_predict_marathon_sec = Column(Integer, nullable=True)
+
     wellness_synced_at = Column(String, nullable=True)  # dedup marker, mirrors Run.detail_synced_at
 
 
@@ -693,6 +704,7 @@ def init_db():
     _migrate_daily_steps_composite_pk()
     _migrate_sync_meta_to_user_keys()
     _backfill_detail_synced_at()
+    _normalize_activity_types()
     _seed_default_user_and_credentials()
     _seed_marathon_goal()
     _seed_default_recovery_tool()
@@ -776,6 +788,26 @@ def _backfill_detail_synced_at():
             "UPDATE runs SET detail_synced_at = ? WHERE detail_synced_at IS NULL",
             (datetime.now(timezone.utc).isoformat(),),
         )
+        conn.commit()
+
+
+def _normalize_activity_types():
+    """P4 backfill: normalize all existing activity_type values on read to their
+    canonical forms — normalize in-place so future _all_runs calls see canonical
+    types and the broadened filter (P4's next step) can work correctly."""
+    from .stats import _normalize_activity_type
+    with engine.connect() as conn:
+        # Fetch all distinct raw activity_type values currently in the DB
+        result = conn.exec_driver_sql("SELECT DISTINCT activity_type FROM runs")
+        raw_types = {row[0] for row in result if row[0]}
+        # Normalize each distinct value and update any that changed
+        for raw_type in raw_types:
+            normalized = _normalize_activity_type(raw_type)
+            if raw_type != normalized:
+                conn.exec_driver_sql(
+                    "UPDATE runs SET activity_type = ? WHERE activity_type = ?",
+                    (normalized, raw_type),
+                )
         conn.commit()
 
 

@@ -79,15 +79,6 @@ def test_distinct_days_are_not_collapsed(db, make_activity, user_id):
     assert summary["runCount"] == 2
 
 
-@pytest.mark.xfail(
-    reason="KNOWN GAP, documented not accidental — P4 fixes this. A Garmin-only run "
-           "(no Strava counterpart) is silently excluded from every stat by the "
-           "exact-match \"Run\" filter. Harmless on the current real dataset "
-           "(verified: 0 such rows, because Garmin auto-forwards to Strava) but it "
-           "breaks the moment that forwarding is disconnected or a device syncs only "
-           "to Garmin. Remove this marker in P4.",
-    strict=True,
-)
 def test_garmin_only_run_is_still_counted(db, make_activity, user_id):
     make_activity(id="garmin_solo", source="garmin", activity_type="running",
                   date="2026-07-25", distance_mi=7.0, moving_time_sec=3780)
