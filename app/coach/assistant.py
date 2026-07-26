@@ -51,6 +51,7 @@ _TOOL_NAMES = [
     "render_chart", "get_goals",
     "get_recovery_tools", "recommend_recovery_session", "get_recovery_sessions",
     "search_chat_history",
+    "fetch_article_text",
 ]
 ALLOWED_TOOL_NAMES = [f"mcp__runlog__{name}" for name in _TOOL_NAMES]
 
@@ -526,6 +527,19 @@ def _build_tools(user_id: str, is_test: bool = False) -> list:
         result = _db_call(stats.search_chat_history, args["query"], args.get("limit", 10), user_id=user_id)
         return {"content": [{"type": "text", "text": json.dumps(result)}]}
 
+    @tool("fetch_article_text", "Extract and return plain text from an article URL. Useful for evaluating training/nutrition/recovery articles the user shares. Returns up to 5000 characters of extracted text (no HTML tags). Fails gracefully if the URL is unreachable or malformed.", {
+        "type": "object",
+        "properties": {
+            "url": {"type": "string", "description": "Article URL to fetch (must be http:// or https://)"},
+        },
+        "required": ["url"],
+    })
+    async def fetch_article_text(args):
+        text = stats.fetch_article_text(args["url"])
+        if not text:
+            return {"content": [{"type": "text", "text": f"Could not fetch article text from {args['url']} (URL unreachable, timeout, or invalid)"}], "is_error": True}
+        return {"content": [{"type": "text", "text": text}]}
+
     return [
         get_run_summary, get_weekly_mileage, get_monthly_mileage, get_personal_records,
         get_pace_trend, get_training_load_trend, get_readiness, get_daily_steps, query_runs, get_run_detail,
@@ -535,6 +549,7 @@ def _build_tools(user_id: str, is_test: bool = False) -> list:
         render_chart, get_goals,
         get_recovery_tools, recommend_recovery_session, get_recovery_sessions,
         search_chat_history,
+        fetch_article_text,
     ]
 
 

@@ -991,3 +991,52 @@ def search_chat_history(db, query: str, limit: int = 10, user_id: str = DEFAULT_
         # Return empty gracefully rather than crashing — the search tool becomes
         # a no-op until the index is built.
         return []
+
+
+def fetch_article_text(url: str, max_chars: int = 5000) -> str | None:
+    """Fetch and extract main text content from an article URL. Returns plain text
+    (no HTML tags), truncated to max_chars (default 5000 for token efficiency).
+    P16: Used by the assistant for article evaluation. Fails gracefully (returns
+    None) on HTTP errors, timeouts, or malformed content."""
+    try:
+        import requests
+        import re
+        from html.parser import HTMLParser
+        
+        headers = {"User-Agent": "HALE-fitness-coach/1.0"}
+        response = requests.get(url, timeout=10, headers=headers)
+        response.raise_for_status()
+        
+        html_content = response.text
+        
+        # Simple HTML tag stripper (not a full parser, but efficient for our use)
+        class TextExtractor(HTMLParser):
+            def __init__(self):
+                super().__init__()
+                self.text_parts = []
+                self.skip_tags = {"script", "style", "noscript"}
+                self.current_tag = None
+            
+            def handle_starttag(self, tag, attrs):
+                self.current_tag = tag
+            
+            def handle_endtag(self, tag):
+                self.current_tag = None
+            
+            def handle_data(self, data):
+                if self.current_tag not in self.skip_tags:
+                    text = data.strip()
+                    if text:
+                        self.text_parts.append(text)
+        
+        extractor = TextExtractor()
+        extractor.feed(html_content)
+        
+        # Join extracted text, collapse multiple spaces
+        text = " ".join(extractor.text_parts)
+        text = re.sub(r"\s+", " ", text)
+        
+        # Truncate to max_chars and return
+        return text[:max_chars] if text else None
+    except Exception:
+        return None
