@@ -366,6 +366,15 @@ complexity ("no backfill, no second write path to keep in sync").
 
 ## 2. P21 — Multi-activity weekly plan builder (design now, build later)
 
+> **SUPERSEDED — see `docs/P21_CONCURRENT_GOALS.md`.** This section assumed one plan
+> per goal, with "secondary activities" as an occasional ride slotted into a run block.
+> User direction during P20 implementation reframed it: one intertwined plan with a
+> primary goal and supporting goals, sharing a single budget bounded by real weekly
+> hours, where some sessions advance more than one goal. Sub-sections below that remain
+> valid under the new model (planned-interruption windows §2.2, sleep-as-soft-warning
+> §2.4, `Goal.periodizes_training` §2.5) are carried forward there explicitly; the
+> one-plan-per-goal structure in §2.1/§2.3 is not.
+
 P21 is where a started `TrainingPlan` starts actually changing what the
 generator does. Every item below is additive/opt-in: a user who never starts a
 plan, or starts one but never sets its P21 fields, gets byte-identical
