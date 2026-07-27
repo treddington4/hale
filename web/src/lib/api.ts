@@ -363,6 +363,25 @@ export interface StrengthStep {
 
 export type WorkoutStep = LegacyStep | EnduranceStep | StrengthStep
 
+// Present only on sessions prescribed by heart rate + duration with no distance —
+// Garmin's adaptive plan works that way, so those days would otherwise show no distance
+// at all. Derived at read time from the user's own recent runs at a similar HR doing the
+// same KIND of session; never stored, because it depends on current fitness.
+export interface EstimatedDistance {
+  distanceMi: number
+  paceSecPerMi: number
+  basePaceSecPerMi: number
+  heatMultiplier: number
+  heatIndexF: number | null
+  targetHr: number
+  durationSec: number
+  sampleSize: number
+  hrBandBpm: number
+  // False means there weren't enough same-kind sessions and the estimate fell back to
+  // pooling all run types — materially less reliable, so the UI should say so.
+  typeMatched: boolean
+}
+
 export interface Workout {
   id: string
   scheduledDate: string
@@ -371,6 +390,7 @@ export interface Workout {
   targetDistanceMi: number | null
   targetPaceSecPerMi: number | null
   targetDurationSec: number | null
+  targetHrBpm: number | null
   notes: string | null
   steps: WorkoutStep[] | null
   status: WorkoutStatus
@@ -378,6 +398,7 @@ export interface Workout {
   critiqueText: string | null
   createdAt: string
   source: string
+  estimatedDistance?: EstimatedDistance
 }
 
 export interface WorkoutInput {

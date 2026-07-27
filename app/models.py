@@ -504,6 +504,12 @@ class Workout(Base):
     target_distance_mi = Column(Float, nullable=True)
     target_pace_sec_per_mi = Column(Integer, nullable=True)
     target_duration_sec = Column(Integer, nullable=True)
+    # Average-HR target. Garmin's adaptive plan prescribes HR + duration and leaves
+    # distance null, so this is the missing half of "how far is that session actually?" —
+    # see stats.estimate_pace_at_hr, which turns (HR, duration) into an estimated distance
+    # using the user's own recent HR-to-pace relationship. Previously this value only
+    # survived as free text inside `notes` ("Base — 143bpm").
+    target_hr_bpm = Column(Integer, nullable=True)
     notes = Column(Text, nullable=True)  # coach's prescription rationale
     steps_json = Column(Text, nullable=True)  # ordered JSON list of structured steps, see
                                                 # coach.VALID_STEP_SIDES / coach._steps_to_dicts —
@@ -799,6 +805,7 @@ def init_db():
     _backfill_detail_synced_at()
     _normalize_activity_types()
     _migrate_chat_messages_fts()
+    _backfill_workout_target_hr()
     _seed_default_user_and_credentials()
     _seed_marathon_goal()
     _seed_default_recovery_tool()
@@ -838,6 +845,44 @@ def _migrate_add_missing_columns():
                         "INTEGER" if isinstance(col.type, (Integer, Boolean)) else "REAL"
                     conn.exec_driver_sql(f"ALTER TABLE {table_name} ADD COLUMN {col.name} {col_type}")
         conn.commit()
+
+
+def _backfill_workout_target_hr():
+    """Recover the HR target from the notes of Garmin workouts synced before
+    Workout.target_hr_bpm existed. Garmin's adaptive plan puts it in the free-text
+    workoutDescription ("Base — 143bpm"), which the sync only ever concatenated into
+    `notes` — so every already-synced row has the number but nowhere structured to read
+    it from, and no distance estimate is possible without it.
+
+    Idempotent: only fills rows where the column is still NULL, so a later real sync
+    value is never overwritten by a re-parse of stale note text."""
+    import re as _re
+    pattern = _re.compile(r"(\d{2,3})\s*bpm", _re.IGNORECASE)
+    session = SessionLocal()
+    try:
+        rows = (
+            session.query(Workout)
+            .filter(Workout.source == "garmin", Workout.target_hr_bpm.is_(None),
+                    Workout.notes.isnot(None))
+            .all()
+        )
+        n = 0
+        for w in rows:
+            m = pattern.search(w.notes or "")
+            if not m:
+                continue
+            bpm = int(m.group(1))
+            if 60 <= bpm <= 220:
+                w.target_hr_bpm = bpm
+                n += 1
+        if n:
+            session.commit()
+            log.info(f"backfilled target_hr_bpm on {n} Garmin workout(s)")
+    except Exception as e:
+        session.rollback()
+        log.warning(f"target_hr_bpm backfill skipped: {e}")
+    finally:
+        session.close()
 
 
 def _migrate_backfill_sti_type():

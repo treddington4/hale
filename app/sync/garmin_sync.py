@@ -7,6 +7,7 @@ Use Strava as your primary source; treat this as a bonus.
 
 import os
 import io
+import re
 import json
 import time
 import logging
@@ -1072,6 +1073,26 @@ def _fetch_exercise_sets(client, activity_id) -> list:
     return sets
 
 
+_TARGET_HR_RE = re.compile(r"(\d{2,3})\s*bpm", re.IGNORECASE)
+
+
+def _parse_target_hr_bpm(description: str | None) -> int | None:
+    """Pull the average-HR target out of Garmin's free-text workoutDescription (e.g.
+    "143bpm"). Garmin's adaptive plan prescribes HR + duration and leaves
+    estimatedDistanceInMeters null, so this number is the only thing that makes the
+    session's distance derivable at all — see stats.estimate_pace_at_hr.
+
+    Bounded to a plausible human range so a stray number in a differently-worded
+    description can't be silently stored as a heart rate."""
+    if not description:
+        return None
+    m = _TARGET_HR_RE.search(description)
+    if not m:
+        return None
+    bpm = int(m.group(1))
+    return bpm if 60 <= bpm <= 220 else None
+
+
 def _fetch_adaptive_plan_workouts(client, start_date: str, end_date: str) -> list:
     """Garmin's adaptive-coach suggested workouts for any active running plan, if one
     exists — raw fetch + unit conversion only; coach.py owns the semantic workout_type
@@ -1123,6 +1144,7 @@ def _fetch_adaptive_plan_workouts(client, start_date: str, end_date: str) -> lis
                 "activityType": coach.GARMIN_SPORT_TYPE_MAP.get(sport_key, "Run"),
                 "targetDistanceMi": round(distance_m / METERS_PER_MILE, 2) if distance_m else None,
                 "targetDurationSec": tw.get("estimatedDurationInSecs"),
+                "targetHrBpm": _parse_target_hr_bpm(desc),
                 "notes": f"Garmin adaptive plan: {tw.get('workoutName') or phrase}" + (f" — {desc}" if desc else ""),
                 "garminWorkoutUuid": tw.get("workoutUuid"),
             })

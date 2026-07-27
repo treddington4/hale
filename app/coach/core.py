@@ -746,6 +746,7 @@ def _workout_to_dict(w: Workout) -> dict:
         "id": w.id, "scheduledDate": w.scheduled_date, "workoutType": w.workout_type,
         "activityType": w.activity_type, "targetDistanceMi": w.target_distance_mi,
         "targetPaceSecPerMi": w.target_pace_sec_per_mi, "targetDurationSec": w.target_duration_sec,
+        "targetHrBpm": w.target_hr_bpm,
         "notes": w.notes, "steps": _steps_from_json(w.steps_json), "status": w.status,
         "linkedRunId": w.linked_run_id, "critiqueText": w.critique_text, "createdAt": w.created_at,
         "source": w.source or "coach",  # legacy-NULL rows predate this column
@@ -803,14 +804,16 @@ def sync_garmin_suggested_workouts(db, entries: list, user_id: str = DEFAULT_USE
             existing.activity_type = e["activityType"]
             existing.target_distance_mi = e.get("targetDistanceMi")
             existing.target_duration_sec = e.get("targetDurationSec")
+            existing.target_hr_bpm = e.get("targetHrBpm")
             existing.garmin_workout_uuid = e.get("garminWorkoutUuid")
         else:
             db.add(Workout(
                 id=f"workout_{uuid.uuid4().hex[:12]}", user_id=user_id,
                 scheduled_date=e["scheduledDate"], workout_type=e["workoutType"],
                 activity_type=e["activityType"], target_distance_mi=e.get("targetDistanceMi"),
-                target_duration_sec=e.get("targetDurationSec"), notes=e.get("notes"),
-                status="planned", source="garmin", garmin_workout_uuid=e.get("garminWorkoutUuid"),
+                target_duration_sec=e.get("targetDurationSec"), target_hr_bpm=e.get("targetHrBpm"),
+                notes=e.get("notes"), status="planned", source="garmin",
+                garmin_workout_uuid=e.get("garminWorkoutUuid"),
                 created_at=datetime.now(timezone.utc).isoformat(),
             ))
         synced += 1
@@ -1066,7 +1069,24 @@ def list_workouts(db, start_date=None, end_date=None, status=None, user_id: str 
     if status:
         workouts = [w for w in workouts if w.status == status]
 
-    return [_workout_to_dict(w) for w in workouts]
+    # Garmin's adaptive plan prescribes HR + duration with distance left null, so a
+    # planned session otherwise shows no distance at all. Estimated at read time, not
+    # stored: the estimate depends on recent fitness (and, once wired, the forecast), so
+    # a value frozen at sync time would be stale by the time the session comes around.
+    # Only ever added to rows that genuinely lack a real distance — a prescribed distance
+    # always wins over an estimate.
+    out = []
+    for w in workouts:
+        d = _workout_to_dict(w)
+        if d["targetDistanceMi"] is None and w.target_hr_bpm and w.target_duration_sec:
+            est = stats.estimate_workout_distance(
+                db, w.target_hr_bpm, w.target_duration_sec,
+                activity_type=w.activity_type or "Run", user_id=user_id,
+                workout_type=w.workout_type)
+            if est:
+                d["estimatedDistance"] = est
+        out.append(d)
+    return out
 
 
 # ---------- Recovery tools/sessions (compression boots, etc — see RecoveryTool's

@@ -10,6 +10,7 @@ import { StartPlanDialog } from "@/components/workouts/StartPlanDialog"
 import { Button } from "@/components/ui/button"
 import { EmptyState } from "@/components/ui/empty-state"
 import { Target } from "lucide-react"
+import { cn } from "@/lib/utils"
 
 const PHASE_BLURBS: Record<PlanWeek["phase"], string> = {
   base: "Building aerobic volume",
@@ -31,6 +32,15 @@ function PlanGroup({ plan, defaultExpanded }: { plan: TrainingPlan; defaultExpan
   const weekWorkouts = (workouts ?? []).filter(
     (w) => current && w.scheduledDate >= current.weekStart && w.scheduledDate <= addDays(current.weekStart, 6),
   )
+
+  // Real prescribed distance where one exists, the HR-derived estimate otherwise — the
+  // whole point being that an HR+duration plan has no distance of its own to total up.
+  const runWorkouts = weekWorkouts.filter((w) => w.activityType === "Run")
+  const scheduledMi = runWorkouts.reduce(
+    (sum, w) => sum + (w.targetDistanceMi ?? w.estimatedDistance?.distanceMi ?? 0),
+    0,
+  )
+  const hasEstimates = runWorkouts.some((w) => !w.targetDistanceMi && w.estimatedDistance)
 
   const daysUntilRace = plan.goalTargetDate
     ? Math.max(0, Math.round((new Date(plan.goalTargetDate + "T00:00:00").getTime() - new Date(today + "T00:00:00").getTime()) / 86_400_000))
@@ -75,6 +85,29 @@ function PlanGroup({ plan, defaultExpanded }: { plan: TrainingPlan; defaultExpan
                   </span>
                   {current.frozen && <span className="text-hale-hot"> · frozen (readiness)</span>}
                 </div>
+                {/* The two planners can disagree, and by how much is the single most
+                    useful thing this panel can tell you — Garmin prescribing well above
+                    HALE's ramp ceiling is a real signal, not a display quirk. */}
+                {scheduledMi > 0 && (
+                  <div className="text-xs">
+                    <span className="text-muted-foreground">Scheduled this week: </span>
+                    <span className="tabular-nums">
+                      {hasEstimates && "~"}
+                      {scheduledMi.toFixed(1)} mi
+                    </span>
+                    {current.targetMi > 0 && (
+                      <span
+                        className={cn(
+                          "ml-1",
+                          scheduledMi > current.targetMi * 1.15 ? "text-hale-hot" : "text-muted-foreground",
+                        )}
+                      >
+                        ({scheduledMi > current.targetMi ? "+" : ""}
+                        {Math.round(((scheduledMi - current.targetMi) / current.targetMi) * 100)}% vs budget)
+                      </span>
+                    )}
+                  </div>
+                )}
               </div>
 
               <PlanWeekDays week={current} workouts={weekWorkouts} todayIso={today} />

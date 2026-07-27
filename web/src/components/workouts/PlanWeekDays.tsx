@@ -84,6 +84,22 @@ export function PlanWeekDays({
                     ) : w.targetDurationSec ? (
                       <span className="text-muted-foreground">{Math.round(w.targetDurationSec / 60)} min</span>
                     ) : null}
+                    {w.targetHrBpm && <span className="text-muted-foreground">@{w.targetHrBpm}bpm</span>}
+                    {/* "~" and the italics are load-bearing: this is derived from past
+                        runs, not something Garmin prescribed, and must never read as a
+                        given. Dimmed further when the estimate had to pool session types. */}
+                    {w.estimatedDistance && (
+                      <span
+                        className={cn("text-hale-faint italic", !w.estimatedDistance.typeMatched && "opacity-70")}
+                        title={
+                          `Estimated from ${w.estimatedDistance.sampleSize} of your runs near ` +
+                          `${w.estimatedDistance.targetHr}bpm` +
+                          (w.estimatedDistance.typeMatched ? "" : " (mixed session types — rough)")
+                        }
+                      >
+                        ~{w.estimatedDistance.distanceMi.toFixed(1)} mi
+                      </span>
+                    )}
                     <SourceTag source={w.source} />
                     {w.status !== "planned" && (
                       <span className="text-hale-faint text-[10px]">{w.status}</span>

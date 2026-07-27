@@ -1074,3 +1074,152 @@ def extract_body_battery_impact(activity_row) -> dict | None:
         }
     except Exception:
         return None
+
+
+# ---------- HR-driven distance estimation ----------
+#
+# Garmin's adaptive plan prescribes heart rate + duration and leaves distance null, so
+# "how far is Thursday's 91-minute run at 143bpm?" has no answer stored anywhere. These
+# turn that into an estimate from the user's own history.
+
+# Recency half-life. Aerobic fitness moves enough to invalidate old data outright:
+# measured on this repo's own production data, efficiency factor (speed per heartbeat)
+# went 0.0221 -> 0.0400 between 2022 and 2026 — an 81% improvement, i.e. the same
+# heart rate that once produced ~17:00/mi now produces ~9:53/mi. A 60-day half-life
+# means a run from six months ago carries ~1/8 the weight of last week's.
+PACE_AT_HR_HALF_LIFE_DAYS = 60
+PACE_AT_HR_LOOKBACK_DAYS = 365
+PACE_AT_HR_BAND_BPM = 8       # initial +/- window around the target HR
+PACE_AT_HR_WIDE_BAND_BPM = 15  # widened once, if the tight band is too sparse
+PACE_AT_HR_MIN_SAMPLES = 4
+
+# Heat slows endurance running, but this user's own data CANNOT currently measure by how
+# much: temperature correlates with date, and their fitness changed dramatically over the
+# same window, so a fitted coefficient would partly be measuring fitness rather than heat.
+# (Their measured pace was actually *fastest* at 60-72F and slowest below 45F, which is
+# the confound, not physiology.) So this is a deliberately generic, conservative
+# approximation of the widely-reported "endurance pace degrades a few percent per 10F
+# above roughly 60F" relationship — NOT personalized, and not from a specific study this
+# code can cite. It is surfaced to the user as general guidance for exactly that reason.
+# Revisit personalizing it once a full season of data at stable fitness exists.
+HEAT_NEUTRAL_F = 60.0
+HEAT_PACE_PENALTY_PER_10F = 0.03  # +3% pace (slower) per 10F of heat index above neutral
+HEAT_MAX_PENALTY = 0.20           # cap, so an extreme forecast can't produce a wild number
+
+
+def heat_pace_multiplier(heat_index_f: float | None) -> float:
+    """Pace multiplier for heat. 1.0 at or below HEAT_NEUTRAL_F (and whenever no
+    temperature is known — never invent a penalty from missing data)."""
+    if heat_index_f is None or heat_index_f <= HEAT_NEUTRAL_F:
+        return 1.0
+    penalty = ((heat_index_f - HEAT_NEUTRAL_F) / 10.0) * HEAT_PACE_PENALTY_PER_10F
+    return 1.0 + min(penalty, HEAT_MAX_PENALTY)
+
+
+# Workout.workout_type -> Run.suggested_type, so an estimate can be drawn from sessions
+# of the same KIND. Average pace means something different per kind: an interval session
+# averaging 165bpm can average 12:36/mi because the average includes recovery jogs and
+# standing rest, while an easy run at the same HR averages ~9:30/mi. Pooling them
+# (confirmed on real data) contaminates both estimates in opposite directions.
+_WORKOUT_TYPE_TO_RUN_TYPE = {
+    "easy": "Easy", "tempo": "Tempo", "interval": "Interval", "long": "Long Run",
+}
+
+
+def estimate_pace_at_hr(db, target_hr: int, heat_index_f: float | None = None,
+                        activity_type: str = "Run", user_id: str = DEFAULT_USER_ID,
+                        as_of=None, workout_type: str | None = None) -> dict | None:
+    """Predicted pace (sec/mi) at `target_hr`, from this user's own recent runs.
+
+    Matches runs whose average HR is near the target and takes a recency-weighted mean of
+    their paces, rather than assuming pace scales linearly with HR — the speed/HR
+    relationship is not proportional (heart rate has a resting floor), so extrapolating a
+    single efficiency-factor ratio across a wide HR gap would be wrong. Widens the HR band
+    once if the tight one is too sparse, and reports which band and how many runs were
+    used so the caller can be honest about confidence rather than presenting a guess as a
+    measurement.
+
+    Treadmill runs are excluded: their pace is set by the belt, not by the athlete's
+    response to effort, so they carry no information about outdoor pace at a given HR.
+
+    Returns None when there isn't enough real data — never a fabricated fallback.
+    """
+    if not target_hr:
+        return None
+    as_of = as_of or local_today(user_id)
+    cutoff = (as_of - timedelta(days=PACE_AT_HR_LOOKBACK_DAYS)).isoformat()
+
+    candidates = [
+        r for r in _all_runs(db, activity_type, user_id)
+        if r.date and r.date >= cutoff and r.avg_hr and r.avg_pace_sec_per_mi
+        and not getattr(r, "is_treadmill", False)
+    ]
+    if not candidates:
+        return None
+
+    wanted_run_type = _WORKOUT_TYPE_TO_RUN_TYPE.get((workout_type or "").lower())
+
+    def _weighted(band, same_type_only):
+        rows = [r for r in candidates if abs(r.avg_hr - target_hr) <= band]
+        if same_type_only:
+            rows = [r for r in rows if (r.type_override or r.suggested_type) == wanted_run_type]
+        if len(rows) < PACE_AT_HR_MIN_SAMPLES:
+            return None, rows
+        num = den = 0.0
+        for r in rows:
+            age = (as_of - datetime.strptime(r.date, "%Y-%m-%d").date()).days
+            w = 0.5 ** (age / PACE_AT_HR_HALF_LIFE_DAYS)
+            num += r.avg_pace_sec_per_mi * w
+            den += w
+        return (num / den if den else None), rows
+
+    # Same kind of session first (tight HR band, then wide), only then any kind. Matching
+    # the session type matters more than the HR band width: an interval session's average
+    # pace is dragged slow by its own recoveries, so predicting an interval day from easy
+    # runs — or an easy day from intervals — is wrong in a way a wider HR band is not.
+    attempts = []
+    if wanted_run_type:
+        attempts += [(PACE_AT_HR_BAND_BPM, True), (PACE_AT_HR_WIDE_BAND_BPM, True)]
+    attempts += [(PACE_AT_HR_BAND_BPM, False), (PACE_AT_HR_WIDE_BAND_BPM, False)]
+
+    pace = rows = None
+    band = PACE_AT_HR_BAND_BPM
+    type_matched = False
+    for try_band, same_type in attempts:
+        pace, rows = _weighted(try_band, same_type)
+        if pace is not None:
+            band, type_matched = try_band, same_type
+            break
+    if pace is None:
+        return None
+
+    multiplier = heat_pace_multiplier(heat_index_f)
+    adjusted = pace * multiplier
+    return {
+        "paceSecPerMi": round(adjusted, 1),
+        "basePaceSecPerMi": round(pace, 1),
+        "typeMatched": type_matched,
+        "heatMultiplier": round(multiplier, 4),
+        "heatIndexF": heat_index_f,
+        "targetHr": target_hr,
+        "sampleSize": len(rows),
+        "hrBandBpm": band,
+    }
+
+
+def estimate_workout_distance(db, target_hr: int, duration_sec: int,
+                              heat_index_f: float | None = None,
+                              activity_type: str = "Run", user_id: str = DEFAULT_USER_ID,
+                              as_of=None, workout_type: str | None = None) -> dict | None:
+    """Estimated distance for an HR+duration prescription — the shape Garmin's adaptive
+    plan actually uses. Returns None (not a guess) when either input is missing or there
+    isn't enough history to predict pace."""
+    if not target_hr or not duration_sec:
+        return None
+    est = estimate_pace_at_hr(db, target_hr, heat_index_f, activity_type, user_id, as_of,
+                              workout_type=workout_type)
+    if not est or not est["paceSecPerMi"]:
+        return None
+    est["distanceMi"] = round(duration_sec / est["paceSecPerMi"], 2)
+    est["durationSec"] = duration_sec
+    return est
