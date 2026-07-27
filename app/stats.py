@@ -1047,11 +1047,11 @@ def fetch_article_text(url: str, max_chars: int = 5000) -> str | None:
 
 def extract_body_battery_impact(activity_row) -> dict | None:
     """P19: Extract net body battery impact from an activity's intraday series.
-    
+
     Returns: {"startValue": 75, "endValue": 42, "delta": -33, "recovered": False}
     or None if insufficient data (no series, or values at start/end can't be determined).
     """
-    if not activity_row or not activity_row.body_battery_json:
+    if not activity_row or not getattr(activity_row, 'body_battery_json', None):
         return None
 
     try:
