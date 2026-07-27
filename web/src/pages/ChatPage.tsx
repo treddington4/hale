@@ -32,6 +32,7 @@ export function ChatPage() {
   const [sending, setSending] = useState(false)
   const [historyExpanded, setHistoryExpanded] = useState(false)
   const prefillFired = useRef(false)
+  const scrollRef = useRef<HTMLDivElement>(null)
 
   const allMessages = useMemo<DisplayMessage[]>(() => {
     const history = historyQuery.data ?? []
@@ -87,6 +88,15 @@ export function ChatPage() {
     // eslint-disable-next-line react-hooks/exhaustive-deps -- fire once when configured status lands
   }, [statusQuery.data?.configured])
 
+  // Pin to the newest message whenever the transcript changes. Runs on expand/collapse
+  // too, since that also changes what's rendered. Jumps to the BOTTOM of the newest
+  // message rather than its top — a long reply's start stays reachable by scrolling up,
+  // which is the whole point of the mt-auto fix below.
+  useEffect(() => {
+    const el = scrollRef.current
+    if (el) el.scrollTop = el.scrollHeight
+  }, [visible.length, pendingUserText, historyExpanded])
+
   const persona = personaQuery.data ? PERSONA_LABELS[personaQuery.data.personality] : null
 
   return (
@@ -104,28 +114,35 @@ export function ChatPage() {
         <Skeleton className="h-64 w-full" />
       ) : (
         <>
-          <div className="flex flex-1 flex-col justify-end gap-2.5 overflow-y-auto">
-            {allMessages.length === 0 ? (
-              <EmptyState
-                icon={MessageCircle}
-                title={persona ? `Chat with your ${persona.name}` : "Chat with your coach"}
-                message={persona?.blurb ?? "Ask about your training — grounded in your real data."}
-              />
-            ) : (
-              <>
-                {allMessages.length > CHAT_COLLAPSE_VISIBLE_COUNT && (
-                  <button
-                    className="border-border text-hale-faint hover:text-foreground hover:border-muted-foreground self-center rounded-xl border px-2.5 py-1 text-[11px]"
-                    onClick={() => setHistoryExpanded(!historyExpanded)}
-                  >
-                    {shouldCollapse ? `▲ Show earlier (${hiddenCount})` : "▼ Hide earlier"}
-                  </button>
-                )}
-                {visible.map((m, i) => (
-                  <ChatBubble key={i} msg={m} />
-                ))}
-              </>
-            )}
+          {/* `justify-end` on this scroller was a real bug: once the conversation
+              overflowed, the content spilled past the TOP edge, and scrollTop can't go
+              negative — so the start of a long reply became permanently unreachable.
+              `mt-auto` on the inner wrapper keeps the same bottom-pinned look when
+              content is short, while overflow grows downward into scrollable space. */}
+          <div ref={scrollRef} className="flex flex-1 flex-col overflow-y-auto">
+            <div className="mt-auto flex flex-col gap-2.5">
+              {allMessages.length === 0 ? (
+                <EmptyState
+                  icon={MessageCircle}
+                  title={persona ? `Chat with your ${persona.name}` : "Chat with your coach"}
+                  message={persona?.blurb ?? "Ask about your training — grounded in your real data."}
+                />
+              ) : (
+                <>
+                  {allMessages.length > CHAT_COLLAPSE_VISIBLE_COUNT && (
+                    <button
+                      className="border-border text-hale-faint hover:text-foreground hover:border-muted-foreground self-center rounded-xl border px-2.5 py-1 text-[11px]"
+                      onClick={() => setHistoryExpanded(!historyExpanded)}
+                    >
+                      {shouldCollapse ? `▲ Show earlier (${hiddenCount})` : "▼ Hide earlier"}
+                    </button>
+                  )}
+                  {visible.map((m, i) => (
+                    <ChatBubble key={i} msg={m} />
+                  ))}
+                </>
+              )}
+            </div>
           </div>
 
           {statusQuery.data.configured ? (
