@@ -8,6 +8,7 @@ import { RecoverySessionCard } from "@/components/workouts/RecoverySessionCard"
 import { WorkoutFormDialog } from "@/components/workouts/WorkoutFormDialog"
 import { NewWorkoutDialog } from "@/components/workouts/NewWorkoutDialog"
 import { WorkoutsCalendar } from "@/components/workouts/WorkoutsCalendar"
+import { TrainingPlanSection } from "@/components/workouts/TrainingPlanSection"
 import { Button } from "@/components/ui/button"
 import { Skeleton } from "@/components/ui/skeleton"
 import { EmptyState } from "@/components/ui/empty-state"
@@ -93,6 +94,11 @@ export function WorkoutsPage() {
 
   return (
     <div className="flex flex-col gap-6">
+      {/* Its own axis of organization from the Calendar/List toggle below — a plan
+          groups by training goal, the toggle switches how individual sessions are
+          browsed — so it's visible regardless of which view is selected. */}
+      <TrainingPlanSection />
+
       <div className="flex items-center justify-between gap-3">
         <Button variant="outline" onClick={() => setNewWorkoutOpen(true)}>
           + New Workout

@@ -79,6 +79,26 @@ def test_week_mileage_matches_regardless_of_caller_casing(db, user_id, make_acti
     assert generator._week_mileage(db, user_id, wk, "running") == 10.0
 
 
+def test_week_mileage_deduplicates_cross_source_pairs(db, user_id, make_activity):
+    """Regression, unmasked by fixing the casing bug above (both bugs together
+    returned 0.0 either way, so casing hid this completely until it was fixed).
+
+    Strava and Garmin each write their own copy of the same physical run — CLAUDE.md
+    documents this is never deduplicated in storage, and every mileage consumer must
+    route through stats._all_runs()/merge_duplicate_runs() before summing. This
+    function queried Run directly and summed both copies: confirmed in production, a
+    week that was really ~28mi (one real run per day, Strava+Garmin both syncing it)
+    read as ~52mi — roughly double, prescribing volume proportional to a runner who
+    doesn't exist."""
+    wk = date(2026, 6, 1)  # a Monday
+    make_activity("strava_a", "Run", source="strava", date=wk.isoformat(),
+                  start_time="17:00", distance_mi=5.0)
+    make_activity("garmin_a", "Run", source="garmin", date=wk.isoformat(),
+                  start_time="17:00", distance_mi=5.0)  # same physical run, both sources
+
+    assert generator._week_mileage(db, user_id, wk, "Run") == 5.0
+
+
 def test_established_athlete_is_not_treated_as_cold_start(db, user_id, make_activity):
     """The user-visible half of the bug above: real history must produce a real ramp
     base, never the cold-start branch."""

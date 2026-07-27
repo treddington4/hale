@@ -32,7 +32,7 @@ from sqlalchemy import or_
 
 from ..models import (
     SessionLocal, Workout, Goal, User, UserTrainingConfig, HealthNote,
-    Run, WeeklyPlan, RecoverySession, DEFAULT_USER_ID, owned_by,
+    WeeklyPlan, RecoverySession, DEFAULT_USER_ID, owned_by,
 )
 from .. import stats
 from . import core as coach
@@ -210,26 +210,32 @@ def _is_deload_week(config, week_start) -> bool:
 
 
 def _week_mileage(db, user_id, week_start, activity_type="Run") -> float:
-    """Normalizes `activity_type` before comparing, because P4 made the stored value
-    canonical-lowercase ("run"/"ride") at write time while every caller in this module
-    still passes source-style PascalCase ("Run"/"Ride").
+    """Two real, shipped bugs lived here, found back to back while building P20's plan
+    view — surfaced one at a time because the first one was masking the second.
 
-    That mismatch was a real, shipped bug: this returned 0.0 for every week, so
-    _last_nonzero_week_mileage always reported a cold start and the nightly generator
-    prescribed ~3-6 mile weeks to an athlete actually running ~52. Normalizing here (one
-    place) rather than at each call site means no caller can reintroduce it by passing
-    the casing that reads naturally. Same query-time normalization stats.py already
-    does — see its `_normalize_activity_type("Run") -> "run"` note."""
+    Bug 1 (casing): P4 made the stored value canonical-lowercase ("run"/"ride") at write
+    time, while every caller in this module still passed source-style PascalCase
+    ("Run"/"Ride"). A literal `Run.activity_type == activity_type` matched nothing, so
+    this returned 0.0 for every week, and the nightly generator prescribed ~3-6 mile
+    weeks to an athlete actually running real mileage.
+
+    Bug 2 (dedup, unmasked by fixing bug 1): CLAUDE.md documents that Strava and Garmin
+    each write their own copy of the same physical run, never deduplicated in storage —
+    every consumer is required to call stats._all_runs()/merge_duplicate_runs() before
+    summing anything. This function queried `Run` directly and summed both copies,
+    reporting ~52 mi/week for someone actually running ~28 (confirmed: production had a
+    strava_ and a garmin_ row for nearly every date that week). Bug 1 hid this completely
+    — 0.0 either way looks the same as "not deduplicated" until the casing is fixed.
+
+    Fixed by routing through stats._all_runs(), the one dedup-and-normalize entrypoint
+    every other aggregate in this codebase already uses (see its own docstring), instead
+    of hand-querying Run — so this can't drift from that behavior again, in either
+    direction."""
     week_end = week_start + timedelta(days=6)
-    wanted = stats._normalize_activity_type(activity_type)
-    rows = (
-        db.query(Run)
-        .filter(Run.date >= week_start.isoformat(), Run.date <= week_end.isoformat(),
-                owned_by(Run.user_id, user_id))
-        .all()
+    return sum(
+        r.distance_mi or 0 for r in stats._all_runs(db, activity_type, user_id)
+        if week_start.isoformat() <= r.date <= week_end.isoformat()
     )
-    return sum(r.distance_mi or 0 for r in rows
-               if stats._normalize_activity_type(r.activity_type) == wanted)
 
 
 def _last_nonzero_week_mileage(db, user_id, before_week_start, activity_type, lookback_weeks=COLD_START_LOOKBACK_WEEKS):

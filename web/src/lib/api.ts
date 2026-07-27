@@ -212,6 +212,38 @@ export interface GoalProgress {
   daysRemaining?: number | null
 }
 
+// P20 — goal-tied training plan view. Visualization only: creating a plan changes
+// nothing about what the nightly generator actually prescribes (see P21 for when a
+// started plan starts steering real generation).
+export interface TrainingPlan {
+  id: string
+  goalId: string
+  goalName: string | null
+  goalTargetDate: string | null
+  status: "active" | "archived"
+  createdAt: string
+  // False means this plan's goal isn't the one the generator is currently periodizing
+  // for (e.g. another, nearer race goal is winning) — the weeks below describe this
+  // goal's own arc, not what's actually being prescribed right now.
+  isActivePeriodizationGoal: boolean
+}
+
+export interface PlanWeek {
+  weekStart: string
+  phase: "base" | "build" | "peak" | "taper"
+  isDeload: boolean
+  frozen: boolean
+  targetMi: number
+  actualMi: number | null // null for a week that hasn't happened yet
+  isProjection: boolean
+  isPersisted: boolean
+  isCurrentWeek: boolean
+}
+
+export interface PlanWeeksResponse extends TrainingPlan {
+  weeks: PlanWeek[]
+}
+
 export type GearKind = "shoe" | "bike" | "bike_component"
 
 export interface Gear {
@@ -624,6 +656,16 @@ export const api = {
   updateGoal: (id: string, body: Partial<GoalInput> & { status?: GoalStatus }) =>
     request<Goal>(`/api/goals/${id}`, { method: "PATCH", body: JSON.stringify(body) }),
   deleteGoal: (id: string) => request<{ deleted: true }>(`/api/goals/${id}`, { method: "DELETE" }),
+  plans: () => request<TrainingPlan[]>("/api/plans"),
+  startPlan: (goalId: string) =>
+    request<TrainingPlan>("/api/plans", { method: "POST", body: JSON.stringify({ goalId }) }),
+  planWeeks: (planId: string, opts?: { weeksBack?: number; weeksForward?: number }) => {
+    const params = new URLSearchParams()
+    if (opts?.weeksBack != null) params.set("weeksBack", String(opts.weeksBack))
+    if (opts?.weeksForward != null) params.set("weeksForward", String(opts.weeksForward))
+    const qs = params.toString()
+    return request<PlanWeeksResponse>(`/api/plans/${planId}/weeks${qs ? `?${qs}` : ""}`)
+  },
 
   gear: () => request<Gear[]>("/api/gear"),
   createGear: (body: GearInput) => request<Gear[]>("/api/gear", { method: "POST", body: JSON.stringify(body) }),
