@@ -111,6 +111,14 @@ def get_plan_weeks(plan_id: str, weeksBack: int = 8, weeksForward: int = 12,
         if not goal:
             raise HTTPException(404, "Plan's goal no longer exists")
         payload = _plan_to_dict(p, goal, _driving_goal_id(db, user_id))
+        # Calendar-week volume resets to 0.0 every Monday morning, which is accurate and
+        # useless as a progress signal — on a Monday the panel reads "0.0 of 25.0" while
+        # the athlete has in fact run 24 miles in the past seven days. The rolling figure
+        # is what answers "where am I actually at right now"; the calendar one still
+        # drives the ramp, so both are reported rather than one replacing the other.
+        payload["last7DaysMi"] = round(
+            generator.rolling_window_mileage(
+                db, user_id, generator.plan_activity_type(goal), days=7), 1)
         # Bounds are enforced inside project_week_series, not here — one place, so a
         # future caller can't route around them.
         payload["weeks"] = generator.project_week_series(

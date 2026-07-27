@@ -242,6 +242,9 @@ export interface PlanWeek {
 
 export interface PlanWeeksResponse extends TrainingPlan {
   weeks: PlanWeek[]
+  // Trailing 7 days including today. Not the same as the current week's actualMi — on a
+  // Monday that one is legitimately 0.0 while this reflects a full week of training.
+  last7DaysMi: number
 }
 
 export type GearKind = "shoe" | "bike" | "bike_component"

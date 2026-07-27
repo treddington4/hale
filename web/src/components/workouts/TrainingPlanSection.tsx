@@ -79,11 +79,19 @@ function PlanGroup({ plan, defaultExpanded }: { plan: TrainingPlan; defaultExpan
                 </div>
                 <div className="text-muted-foreground text-xs">{PHASE_BLURBS[current.phase]}</div>
                 <div className="text-xs">
-                  <span className="text-muted-foreground">Run volume: </span>
+                  <span className="text-muted-foreground">This calendar week: </span>
                   <span className="tabular-nums">
                     {current.actualMi?.toFixed(1) ?? "0.0"} of {current.targetMi.toFixed(1)} mi
                   </span>
                   {current.frozen && <span className="text-hale-hot"> · frozen (readiness)</span>}
+                </div>
+                {/* The calendar figure resets to 0.0 every Monday, which is accurate and
+                    useless — "0.0 of 25.0" while 24 miles were run in the past seven days
+                    reads as being far behind. The rolling number is what answers "where
+                    am I actually at"; the calendar one still drives the ramp. */}
+                <div className="text-xs">
+                  <span className="text-muted-foreground">Last 7 days: </span>
+                  <span className="tabular-nums">{data.last7DaysMi.toFixed(1)} mi</span>
                 </div>
                 {/* The two planners can disagree, and by how much is the single most
                     useful thing this panel can tell you — Garmin prescribing well above

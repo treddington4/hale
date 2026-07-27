@@ -276,6 +276,20 @@ def weekly_mileage_map(db, user_id, activity_type) -> dict:
     return out
 
 
+def rolling_window_mileage(db, user_id, activity_type="Run", days=7, as_of=None) -> float:
+    """Mileage over the trailing `days`, inclusive of today — a rolling counterpart to the
+    calendar-week figure the ramp math uses. Not interchangeable with it: on a Monday the
+    calendar week is legitimately 0.0 while the trailing week is a full training load, and
+    only the rolling number answers "where am I right now"."""
+    as_of = as_of or local_today(user_id)
+    start = (as_of - timedelta(days=days - 1)).isoformat()
+    end = as_of.isoformat()
+    return sum(
+        r.distance_mi or 0 for r in stats._all_runs(db, activity_type, user_id)
+        if r.date and start <= r.date <= end
+    )
+
+
 def _ramp_base_mileage(db, user_id, before_week_start, activity_type, config=None, weekly_map=None):
     """The volume the next week's ramp builds from. Returns (miles, is_cold_start).
 
