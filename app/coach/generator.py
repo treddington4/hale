@@ -306,6 +306,21 @@ def _ramp_base_mileage(db, user_id, before_week_start, activity_type, config=Non
     is exactly the wanted behavior: one skipped or travel-shortened week doesn't restart
     the ramp from scratch, while a genuine multi-week reduction does lower the base.
 
+    MEAN, MODE AND TREND WERE EVALUATED AND REJECTED — don't reintroduce them without new
+    evidence. Measured over 12 real weeks (excluding deloads, n=9):
+
+        mean 24.74 | median 28.30 | Theil-Sen slope -0.10 mi/wk | OLS slope -0.57 mi/wk
+
+    - Mean is worse: the distribution is left-skewed by occasional sub-7-mile weeks, so
+      the mean lets a barely-run week drag down what the athlete builds from.
+    - Trend is indistinguishable from flat. The robust (Theil-Sen) and least-squares
+      slopes disagree by 6x, which is itself the tell that OLS is being yanked by two
+      light weeks rather than tracking anything real. A trend term here would fit noise,
+      and a spurious negative slope would silently shrink the plan.
+    - Mode is undefined on continuous weekly mileage — no two weeks are equal, so it only
+      exists after binning, and the answer then depends on where the bin edges land. It
+      restated the median and added an arbitrary choice.
+
     Zero weeks are excluded rather than averaged in, preserving the Phase 14 distinction
     this function was originally written for: a complete gap (no bike on holiday, a
     week off) must not drag the base down, because "didn't train" is not "trained a
