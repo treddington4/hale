@@ -559,12 +559,11 @@ class UserTrainingConfig(Base):
     strength_template = Column(String, default="full_body_ab")  # selects the rotation in generator.py
     # P21-lite — a secondary endurance discipline folded into the weekly rotation, filling
     # the WEEKDAY_SKELETON cross_train slot that otherwise generates a contentless
-    # "Cross-train (Other)" placeholder. 0 = off (the historical behavior), so this
-    # changes nothing for a user who never sets it. Deliberately NOT a second training
+    # "Cross-train (Other)" placeholder. 0 = off, 1 = on. Deliberately NOT a second training
     # goal: it shares the one weekly schedule rather than running a parallel plan — see
     # docs/P21_CONCURRENT_GOALS.md for the full multi-goal model this is a first step
     # toward, and note only 1/week is meaningfully supported today (see _session_share).
-    ride_days_per_week = Column(Integer, default=0)
+    ride_days_per_week = Column(Integer, default=1)
     # {"Run": 30.0, "Ride": 20.0} — a user-declared starting weekly volume per discipline,
     # used ONLY when a discipline has no history at all in this app. Covers the case the
     # generator can't infer: someone who already rides 20mi/wk on a bike that has never
