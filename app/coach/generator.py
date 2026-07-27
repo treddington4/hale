@@ -318,15 +318,33 @@ def _ramp_base_mileage(db, user_id, before_week_start, activity_type, config=Non
     """
     weekly_map = weekly_map if weekly_map is not None else weekly_mileage_map(db, user_id, activity_type)
 
-    def _window(start_offset, end_offset):
+    def _window(start_offset, end_offset, skip_deloads=True):
         vals = []
         for i in range(start_offset, end_offset + 1):
-            mi = weekly_map.get(before_week_start - timedelta(days=7 * i), 0.0)
-            if mi > 0:
-                vals.append(mi)
+            wk = before_week_start - timedelta(days=7 * i)
+            mi = weekly_map.get(wk, 0.0)
+            if mi <= 0:
+                continue
+            # A deload is a PLANNED reduction, so it describes the schedule, not the
+            # athlete's capacity. Letting it into the base means every mesocycle ratchets
+            # the ramp downward: _compute_weekly_budget multiplies the deload week by 0.75,
+            # and the next block then builds 3% up from that deflated number instead of
+            # resuming at the pre-deload level, which is backwards from how periodization
+            # is supposed to work. Verified on real data — the deload weeks here (20.4,
+            # 26.1) sit right in the middle of the distribution and were dragging the
+            # median down purely by rank.
+            if skip_deloads and config is not None and _is_deload_week(config, wk):
+                continue
+            vals.append(mi)
         return vals
 
     recent = _window(1, RAMP_BASE_WINDOW_WEEKS)
+    if not recent:
+        # Every recent week was a deload (or the window is short). Falling through to the
+        # returning-athlete/cold-start seeds here would be badly wrong for someone who is
+        # training normally, so use the deload weeks rather than pretending there's no
+        # history — a slightly low base beats a fabricated one.
+        recent = _window(1, RAMP_BASE_WINDOW_WEEKS, skip_deloads=False)
     if recent:
         return median(recent), False
 

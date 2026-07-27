@@ -170,3 +170,37 @@ def test_weekly_mileage_map_deduplicates(db, user_id, make_activity):
     make_activity("garmin_dup", "Run", source="garmin", date=wk.isoformat(),
                   start_time="17:00", distance_mi=6.0)
     assert generator.weekly_mileage_map(db, user_id, "Run").get(wk) == 6.0
+
+
+# ---------- deload weeks ----------
+
+
+def test_deload_weeks_excluded_from_ramp_base(db, user_id, config, seed_weeks, monkeypatch):
+    """A deload is a PLANNED reduction — it describes the schedule, not the athlete's
+    capacity. Counting it as ramp base makes every mesocycle ratchet the plan downward:
+    _compute_weekly_budget cuts the deload week by 0.75, then the next block builds 3% up
+    from that deflated number instead of resuming at the pre-deload level."""
+    from app.coach import generator
+
+    # Force weeks 2 and 5 back to read as deloads, independent of the real epoch phase.
+    deload_weeks = {MONDAY - timedelta(weeks=2), MONDAY - timedelta(weeks=5)}
+    monkeypatch.setattr(generator, "_is_deload_week", lambda cfg, wk: wk in deload_weeks)
+
+    seed_weeks({6: 30.0, 5: 15.0, 4: 32.0, 3: 31.0, 2: 15.0, 1: 30.0})
+    base, cold = _base(db, user_id, config)
+    assert cold is False
+    # Median of the non-deload weeks (30, 32, 31, 30) is ~30.5; including the deloads
+    # would drag it toward the mid-20s.
+    assert base >= 29.0, f"deload weeks dragged the base to {base}"
+
+
+def test_all_deload_window_falls_back_rather_than_cold_starting(db, user_id, config, seed_weeks, monkeypatch):
+    """Someone training normally must never read as a cold start just because every week
+    in the window happened to be marked deload."""
+    from app.coach import generator
+    monkeypatch.setattr(generator, "_is_deload_week", lambda cfg, wk: True)
+
+    seed_weeks({4: 25.0, 3: 24.0, 2: 26.0, 1: 25.0})
+    base, cold = _base(db, user_id, config)
+    assert cold is False, "an all-deload window must not fabricate a cold start"
+    assert base > 20.0
