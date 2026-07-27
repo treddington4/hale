@@ -363,6 +363,44 @@ def _weeks_active_in_activity(db, user_id, before_week_start, activity_type, max
     )
 
 
+# Relative weight of each day type within a week. These are RATIOS, not fractions of the
+# budget — see _normalized_day_share for why that distinction matters.
+DAY_SHARE = {"long": 0.30, "tempo": 0.18, "interval": 0.15, "easy": 0.10, "cross_train": 0.10, "rest": 0}
+
+
+def _skeleton_workout_type(weekday: int, phase: str) -> str:
+    """The base session type for a weekday, before any readiness gating. Shared by the
+    generator and by _normalized_day_share so the two can't disagree about what a week
+    is supposed to contain."""
+    skeleton_type = WEEKDAY_SKELETON[weekday]
+    if skeleton_type == "quality":
+        return "interval" if phase == "peak" else "tempo"
+    return skeleton_type  # "easy" | "long" | "rest" | "cross_train"
+
+
+def _normalized_day_share(workout_type: str, phase: str) -> float:
+    """This day's fraction of the weekly budget, scaled so a full compliant week actually
+    sums to that budget.
+
+    The raw DAY_SHARE values don't add up to 1.0 across a real week — the skeleton's rest
+    and cross-train days carry no distance, so the days that DO only totalled ~0.78. The
+    weekly target was therefore unreachable by construction: following every prescription
+    perfectly produced 19.5mi against a stated 25.0mi target, which is exactly the kind of
+    number-that-doesn't-add-up this view exists to avoid showing. Normalizing by the week's
+    own total makes the target mean what it says.
+
+    Downgrades (a readiness-gated tempo becoming easy) still legitimately land under
+    budget — that's a real reduction, not an accounting error."""
+    total = sum(
+        DAY_SHARE.get(_skeleton_workout_type(d, phase), 0.10)
+        for d in range(7)
+        if _skeleton_workout_type(d, phase) not in ("rest", "cross_train")
+    )
+    if total <= 0:
+        return 0.0
+    return DAY_SHARE.get(workout_type, 0.10) / total
+
+
 def _sessions_per_week(config, activity_type: str) -> int | None:
     """How many times a week this discipline is trained, when that's known. Returns None
     for the primary discipline (running), whose frequency is set by WEEKDAY_SKELETON
@@ -614,18 +652,7 @@ def _generate_endurance(db, user_id, date, readiness_result, config, activity_ty
         )
         plan = None
 
-    if ignore_schedule:
-        base_type = "easy"
-    else:
-        skeleton_type = WEEKDAY_SKELETON[date.weekday()]
-        if skeleton_type == "quality":
-            base_type = "interval" if phase == "peak" else "tempo"
-        elif skeleton_type == "rest":
-            base_type = "rest"
-        elif skeleton_type == "cross_train":
-            base_type = "cross_train"
-        else:
-            base_type = skeleton_type  # "easy" | "long"
+    base_type = "easy" if ignore_schedule else _skeleton_workout_type(date.weekday(), phase)
 
     trigger_notes = []
     workout_type = base_type
@@ -651,7 +678,6 @@ def _generate_endurance(db, user_id, date, readiness_result, config, activity_ty
     if is_deload and workout_type == "long":
         trigger_notes.append("Deload week — trimmed long run.")
 
-    day_share = {"long": 0.30, "tempo": 0.18, "interval": 0.15, "easy": 0.10, "cross_train": 0.10, "rest": 0}
     target_distance_mi = None
     if workout_type not in ("rest",) and workout_type != "cross_train":
         if is_cold_start:
@@ -661,7 +687,7 @@ def _generate_endurance(db, user_id, date, readiness_result, config, activity_ty
             # absurd "first run" (3mi budget * 10% easy-day share = 0.3mi).
             target_distance_mi = round(budget, 1)
         else:
-            # day_share's fractions assume the discipline is trained ~6-7x/week, which is
+            # DAY_SHARE's fractions assume the discipline is trained ~6-7x/week, which is
             # only true of the primary one. For a discipline done once a week the weekly
             # budget IS the session, and slicing it again produces the same absurdity the
             # cold-start branch above already guards against — confirmed against real data:
@@ -670,8 +696,7 @@ def _generate_endurance(db, user_id, date, readiness_result, config, activity_ty
             if sessions and sessions <= 1:
                 target_distance_mi = round(budget, 1)
             else:
-                share = day_share.get(workout_type, 0.10)
-                target_distance_mi = round(budget * share, 1)
+                target_distance_mi = round(budget * _normalized_day_share(workout_type, phase), 1)
         if target_distance_mi is not None:
             floor = MIN_SESSION_MILES.get(activity_type)
             if floor and target_distance_mi < floor:

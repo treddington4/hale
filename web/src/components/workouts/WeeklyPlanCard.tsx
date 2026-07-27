@@ -43,7 +43,15 @@ export function WeeklyPlanCard({ week }: { week: PlanWeek }) {
           {week.isProjection && <Pill className="text-muted-foreground">Projected</Pill>}
         </div>
         <div className={cn("text-muted-foreground", week.isProjection && "italic")}>
-          {actualLabel} / {targetLabel}
+          {/* Spelled out rather than a bare "x / y" — the unlabelled form read as an
+              unexplained pair of numbers, which is what made this panel confusing. */}
+          {week.isProjection ? (
+            <>planned {targetLabel}</>
+          ) : (
+            <>
+              ran {actualLabel} of {targetLabel}
+            </>
+          )}
         </div>
       </div>
     </div>
