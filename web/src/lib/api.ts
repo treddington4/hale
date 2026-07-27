@@ -164,9 +164,12 @@ export interface CoachIssueDraft {
 // Deliberately never throws — mirrors the legacy send() closure's distinction
 // between an HTTP error (server responded, has a `detail` message) and a
 // network/fetch failure (no response at all), which get different display text.
+// `retryable` says whether re-sending could plausibly succeed; the caller uses it
+// to decide between offering a Retry affordance and recording a permanent error
+// turn in the transcript. This send is never retried automatically — see ChatPage.
 export type ChatSendResult =
   | { ok: true; reply: string; toolCalls: ToolCall[]; charts: ChartSpec[] }
-  | { ok: false; kind: "http" | "network"; message: string }
+  | { ok: false; kind: "http" | "network"; message: string; retryable: boolean }
 
 export interface SleepStageSegment {
   stage: string
@@ -415,6 +418,20 @@ export class ApiError extends Error {
     this.name = "ApiError"
     this.status = status
   }
+}
+
+// Is this failure worth trying again, or will it fail identically forever?
+// A thrown non-ApiError means fetch() itself rejected (offline, DNS, connection
+// refused, TLS) — no response was ever received, so it's transient by definition.
+// An ApiError carries a real status: only 5xx (server-side, often a restart or a
+// blip) and 408/429 (explicitly "try again") can change on their own. Every other
+// 4xx is a statement about the request, and retrying it just burns time — notably
+// 401, which Phase 11's demo-session interceptor is concurrently redirecting on.
+export function isTransientError(error: unknown): boolean {
+  if (error instanceof ApiError) {
+    return error.status >= 500 || error.status === 408 || error.status === 429
+  }
+  return true
 }
 
 // Attaches the demo session's token (if one exists — a no-op on the real NAS
@@ -748,10 +765,20 @@ export const api = {
       })
       handleUnauthorized(res)
       const data = await res.json().catch(() => ({}))
-      if (!res.ok) return { ok: false, kind: "http", message: data.detail || "something went wrong" }
+      if (!res.ok) {
+        return {
+          ok: false,
+          kind: "http",
+          message: data.detail || "something went wrong",
+          retryable: isTransientError(new ApiError(res.status, "")),
+        }
+      }
       return { ok: true, reply: data.reply, toolCalls: data.toolCalls ?? [], charts: data.charts ?? [] }
     } catch {
-      return { ok: false, kind: "network", message: "Network error — try again." }
+      // fetch() rejected outright, so no response came back. Retryable, but only
+      // on an explicit user action: the server may still have processed this
+      // message, and its tool calls can write HealthNote/Workout rows.
+      return { ok: false, kind: "network", message: "Network error — check your connection.", retryable: true }
     }
   },
   sleepStages: (date?: string) =>

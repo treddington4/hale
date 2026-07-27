@@ -31,6 +31,9 @@ export function ChatPage() {
   const [pendingUserText, setPendingUserText] = useState<string | null>(null)
   const [sending, setSending] = useState(false)
   const [historyExpanded, setHistoryExpanded] = useState(false)
+  // A send that failed in a way that could plausibly succeed on a second attempt.
+  // Held out of the transcript until the user resolves it (retry or dismiss).
+  const [failedSend, setFailedSend] = useState<{ text: string; activityId?: string; message: string } | null>(null)
   const prefillFired = useRef(false)
   const scrollRef = useRef<HTMLDivElement>(null)
 
@@ -50,9 +53,24 @@ export function ChatPage() {
 
   async function handleSend(text: string, activityId?: string) {
     setSending(true)
+    setFailedSend(null)
     setPendingUserText(text)
     const result = await api.sendChatMessage(text, activityId)
-    const assistantContent = result.ok ? result.reply : result.kind === "http" ? `Error: ${result.message}` : result.message
+
+    // A retryable failure never gets written into the transcript. The server may
+    // have processed this message before the connection dropped, so the local
+    // history would be claiming something about a turn we genuinely don't know the
+    // outcome of. Park it as a retry offer instead, and let the user decide —
+    // re-sending can re-run tool calls that write HealthNote/Workout rows, so that
+    // has to be a deliberate action rather than something the app does silently.
+    if (!result.ok && result.retryable) {
+      setFailedSend({ text, activityId, message: result.message })
+      setPendingUserText(null)
+      setSending(false)
+      return
+    }
+
+    const assistantContent = result.ok ? result.reply : `Error: ${result.message}`
     qc.setQueryData<ChatMessage[]>(["chatHistory"], (prev) => [
       ...(prev ?? []),
       { role: "user", content: text, toolCalls: null, charts: null },
@@ -95,7 +113,7 @@ export function ChatPage() {
   useEffect(() => {
     const el = scrollRef.current
     if (el) el.scrollTop = el.scrollHeight
-  }, [visible.length, pendingUserText, historyExpanded])
+  }, [visible.length, pendingUserText, historyExpanded, failedSend])
 
   const persona = personaQuery.data ? PERSONA_LABELS[personaQuery.data.personality] : null
 
@@ -141,6 +159,28 @@ export function ChatPage() {
                     <ChatBubble key={i} msg={m} />
                   ))}
                 </>
+              )}
+
+              {failedSend && (
+                <div className="border-hale-hot/40 bg-hale-hot/5 flex flex-col gap-2 self-end rounded-lg border px-3.5 py-2.5">
+                  <div className="text-[13px] leading-relaxed whitespace-pre-wrap">{failedSend.text}</div>
+                  <div className="text-hale-faint text-[11px]">{failedSend.message}</div>
+                  <div className="flex gap-3">
+                    <button
+                      className="text-hale-hot hover:text-foreground text-[11px] font-semibold disabled:opacity-50"
+                      disabled={sending}
+                      onClick={() => void handleSend(failedSend.text, failedSend.activityId)}
+                    >
+                      Retry
+                    </button>
+                    <button
+                      className="text-hale-faint hover:text-foreground text-[11px]"
+                      onClick={() => setFailedSend(null)}
+                    >
+                      Dismiss
+                    </button>
+                  </div>
+                </div>
               )}
             </div>
           </div>
