@@ -559,6 +559,12 @@ class UserTrainingConfig(Base):
     # docs/P21_CONCURRENT_GOALS.md for the full multi-goal model this is a first step
     # toward, and note only 1/week is meaningfully supported today (see _session_share).
     ride_days_per_week = Column(Integer, default=0)
+    # {"Run": 30.0, "Ride": 20.0} — a user-declared starting weekly volume per discipline,
+    # used ONLY when a discipline has no history at all in this app. Covers the case the
+    # generator can't infer: someone who already rides 20mi/wk on a bike that has never
+    # synced here would otherwise be ramped from the 3-mile absolute-beginner floor.
+    # Never overrides real data — see generator._ramp_base_mileage's fallback order.
+    seed_weekly_miles_json = Column(Text, nullable=True)
 
 
 class ExerciseProgress(Base):

@@ -188,13 +188,21 @@ a valid ramp base**, leaving their displayed target honest. Availability is per
 discipline, not one multiplier for the whole window — the same two weeks are a total
 stop for cycling and a partial cut for running.
 
-Worth noting the underlying fragility is general, not honeymoon-specific:
-`_last_nonzero_week_mileage` treats the single most recent nonzero week as gospel, so
-any one-off light week (illness, travel, a work crunch) drags the base down the same
-way. Fixing it generally — e.g. a trailing median rather than the latest value — would
-address all of them at once, but it changes the Phase 14 behavior deliberately designed
-to tell "didn't run last week" apart from "never done this," so it needs its own
-scoped decision rather than being smuggled in with an interruption feature.
+**Update — the general fix landed, and it covers most of this.** The underlying
+fragility was never honeymoon-specific: the old `_last_nonzero_week_mileage` treated the
+single most recent nonzero week as gospel, so any one-off light week (illness, travel, a
+work crunch) cratered the base identically — and symmetrically, one freak long week
+inflated it. `_ramp_base_mileage` now takes a **rolling median of nonzero weeks over a
+6-week window**, which is unmoved by a single outlier in either direction while still
+tracking a sustained change. Zero weeks stay excluded, preserving the Phase 14
+distinction between "didn't train" and "trained a little".
+
+Measured on the honeymoon scenario, that alone takes the post-trip running base from
+4.0mi back to ~29mi. So a declared interruption window is **no longer required** for
+this case — it would only add value for a reduction long enough to move the median
+(3+ weeks in a 6-week window), or to make the *displayed* target honest during the trip
+rather than merely protecting the ramp afterward. Reassess whether it's worth building
+at all once the simpler fix has been lived with.
 
 ## 4. What P20 keeps
 

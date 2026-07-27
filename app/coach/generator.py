@@ -27,6 +27,7 @@ Known v1 approximations, called out explicitly rather than silently:
 import json
 import logging
 from datetime import datetime, timedelta, timezone
+from statistics import median
 
 from sqlalchemy import or_
 
@@ -150,6 +151,19 @@ COLD_START_INITIAL_MILES = 3.0
 COLD_START_WEEKLY_INCREMENT_MILES = 1.5
 COLD_START_LOOKBACK_WEEKS = 8  # weeks checked before concluding "no experience in this activity at all"
 
+# Trailing window the ramp base's median is taken over. 6 weeks spans a full 3:1
+# mesocycle plus buffer, so a scheduled deload can't by itself look like a decline.
+RAMP_BASE_WINDOW_WEEKS = 6
+# How far back to look for a *returning* athlete once the recent window is empty.
+RETURNING_ATHLETE_LOOKBACK_WEEKS = 52
+# What fraction of their old median to resume at. Detraining after a multi-week layoff
+# is real, so resuming at the previous volume outright would be wrong — but so would
+# restarting a marathoner at COLD_START_INITIAL_MILES. A conservative fraction is the
+# honest middle, and the normal weekly ramp climbs back from there. Not derived from a
+# specific study; it's a deliberately cautious v1 constant, and erring low is the safe
+# direction for the one it can hurt.
+RETURNING_ATHLETE_FRACTION = 0.60
+
 # Shortest session worth prescribing, per discipline. The generator's distance math is
 # calibrated for running throughout (COLD_START_INITIAL_MILES above is a running number),
 # and the same figure means very different things on foot vs on a bike — 3 miles is a
@@ -245,33 +259,108 @@ def _week_mileage(db, user_id, week_start, activity_type="Run") -> float:
     )
 
 
-def _last_nonzero_week_mileage(db, user_id, before_week_start, activity_type, lookback_weeks=COLD_START_LOOKBACK_WEEKS):
-    """Real bug fix (Phase 14): distinguishes "an established athlete who just didn't
-    run/ride last week" (real history exists further back — that week's mileage
-    becomes the ramp base) from "genuinely never done this activity" (no nonzero
-    week anywhere in the lookback — a true cold start). The previous code only ever
-    checked the immediately preceding week, so a quiet week for an established
-    athlete and a brand-new activity looked identical (both `0`) and both fell
-    through to the same flat-20-mile fallback. Returns (mileage, is_cold_start)."""
-    for i in range(1, lookback_weeks + 1):
-        wk_start = before_week_start - timedelta(days=7 * i)
-        mileage = _week_mileage(db, user_id, wk_start, activity_type)
-        if mileage > 0:
-            return mileage, False
+def weekly_mileage_map(db, user_id, activity_type) -> dict:
+    """{week_start_date: miles} for every week with activity, in ONE pass.
+
+    _week_mileage routes through stats._all_runs (required — it's the only
+    dedup-and-normalize entrypoint), which loads and merges the entire activity set on
+    every call. Examining N weeks one at a time therefore did N full scans; the ramp
+    base now looks at up to 52 weeks and the plan view examines ~20 weeks, which
+    multiplied out to thousands of redundant scans. Bucketing once collapses that to one."""
+    out = {}
+    for r in stats._all_runs(db, activity_type, user_id):
+        if not r.date:
+            continue
+        wk = _week_start(datetime.strptime(r.date, "%Y-%m-%d").date())
+        out[wk] = out.get(wk, 0.0) + (r.distance_mi or 0)
+    return out
+
+
+def _ramp_base_mileage(db, user_id, before_week_start, activity_type, config=None, weekly_map=None):
+    """The volume the next week's ramp builds from. Returns (miles, is_cold_start).
+
+    Uses the MEDIAN of nonzero weeks in a trailing window, not the most recent nonzero
+    week. The old behavior trusted a single week as gospel and was fragile in both
+    directions — measured against real history (which swings 5.9 to 33.7 mi/wk):
+
+        scenario                current (last nonzero)   median/6w
+        normal                            28.3              24.4
+        one light 5mi week                 5.0  <- crater   24.4
+        one freak 50mi week               50.0  <- inflate  30.6
+
+    A median is unmoved by a single outlier but still tracks a sustained change, which
+    is exactly the wanted behavior: one skipped or travel-shortened week doesn't restart
+    the ramp from scratch, while a genuine multi-week reduction does lower the base.
+
+    Zero weeks are excluded rather than averaged in, preserving the Phase 14 distinction
+    this function was originally written for: a complete gap (no bike on holiday, a
+    week off) must not drag the base down, because "didn't train" is not "trained a
+    little". Only real weeks describe real fitness.
+
+    Falls through three seeds when the window is empty, most-trusted first:
+      1. Returning athlete — real history further back, discounted for detraining.
+      2. A user-declared seed (they know their own baseline; we don't yet).
+      3. Genuine cold start, the conservative linear ramp.
+    """
+    weekly_map = weekly_map if weekly_map is not None else weekly_mileage_map(db, user_id, activity_type)
+
+    def _window(start_offset, end_offset):
+        vals = []
+        for i in range(start_offset, end_offset + 1):
+            mi = weekly_map.get(before_week_start - timedelta(days=7 * i), 0.0)
+            if mi > 0:
+                vals.append(mi)
+        return vals
+
+    recent = _window(1, RAMP_BASE_WINDOW_WEEKS)
+    if recent:
+        return median(recent), False
+
+    # Nothing recent. Real history further back means a returning athlete, not a beginner —
+    # resuming at their old volume outright would ignore genuine detraining, but restarting
+    # at the 3-mile cold-start floor is equally wrong and far more discouraging.
+    older = _window(RAMP_BASE_WINDOW_WEEKS + 1, RETURNING_ATHLETE_LOOKBACK_WEEKS)
+    if older:
+        return median(older) * RETURNING_ATHLETE_FRACTION, False
+
+    seeded = _seed_weekly_miles(config, activity_type)
+    if seeded:
+        return seeded, False
+
     return 0.0, True
 
 
-def _weeks_active_in_activity(db, user_id, before_week_start, activity_type, max_weeks=20) -> int:
+def _seed_weekly_miles(config, activity_type: str) -> float | None:
+    """A user-declared starting volume for a discipline with no history at all — they
+    know they already ride 20mi/wk on a bike this app has never seen; the app doesn't.
+    Absent one, the cold-start ramp applies unchanged."""
+    if config is None or not getattr(config, "seed_weekly_miles_json", None):
+        return None
+    try:
+        seeds = json.loads(config.seed_weekly_miles_json)
+    except (ValueError, TypeError):
+        return None
+    if not isinstance(seeds, dict):
+        return None
+    val = seeds.get(activity_type) or seeds.get(stats._normalize_activity_type(activity_type))
+    try:
+        val = float(val)
+    except (TypeError, ValueError):
+        return None
+    return val if val > 0 else None
+
+
+def _weeks_active_in_activity(db, user_id, before_week_start, activity_type, max_weeks=20,
+                               weekly_map=None) -> int:
     """How many of the trailing max_weeks had any mileage in this activity — a simple
     proxy for "how many weeks into this activity's cold-start ramp am I," used to
-    size the linear increment. Only meaningful once _last_nonzero_week_mileage has
-    already concluded this is a cold start."""
-    count = 0
-    for i in range(1, max_weeks + 1):
-        wk_start = before_week_start - timedelta(days=7 * i)
-        if _week_mileage(db, user_id, wk_start, activity_type) > 0:
-            count += 1
-    return count
+    size the linear increment. Only meaningful once _ramp_base_mileage has already
+    concluded this is a cold start."""
+    weekly_map = weekly_map if weekly_map is not None else weekly_mileage_map(db, user_id, activity_type)
+    return sum(
+        1 for i in range(1, max_weeks + 1)
+        if weekly_map.get(before_week_start - timedelta(days=7 * i), 0.0) > 0
+    )
 
 
 def _sessions_per_week(config, activity_type: str) -> int | None:
@@ -312,7 +401,7 @@ def _get_or_create_weekly_plan(db, user_id, week_start, phase, config):
     if plan:
         return plan
     is_deload = _is_deload_week(config, week_start)
-    last_nonzero, is_cold_start = _last_nonzero_week_mileage(db, user_id, week_start, "Run")
+    last_nonzero, is_cold_start = _ramp_base_mileage(db, user_id, week_start, "Run", config)
     weeks_active = _weeks_active_in_activity(db, user_id, week_start, "Run") if is_cold_start else 0
     ramp_pct = config.weekly_ramp_pct or 3.0
     budget = _compute_weekly_budget(last_nonzero, is_cold_start, ramp_pct, phase, is_deload, weeks_active)
@@ -353,7 +442,7 @@ def plan_activity_type(goal) -> str:
     return types[0] if types else "Run"
 
 
-def plan_week_view(db, user_id, plan, week_start, config=None) -> dict:
+def plan_week_view(db, user_id, plan, week_start, config=None, weekly_map=None) -> dict:
     """One already-started or in-progress week for one TrainingPlan.
 
     Reads the persisted WeeklyPlan row only when BOTH hold:
@@ -388,8 +477,11 @@ def plan_week_view(db, user_id, plan, week_start, config=None) -> dict:
         # that a 2+-flag readiness day capped this week, which depends on that day's state.
         target_mi, is_deload, frozen = persisted.target_tss or 0.0, bool(persisted.is_deload), bool(persisted.frozen)
     else:
-        last_nonzero, is_cold_start = _last_nonzero_week_mileage(db, user_id, week_start, activity_type)
-        weeks_active = _weeks_active_in_activity(db, user_id, week_start, activity_type) if is_cold_start else 0
+        weekly_map = weekly_map if weekly_map is not None else weekly_mileage_map(db, user_id, activity_type)
+        last_nonzero, is_cold_start = _ramp_base_mileage(
+            db, user_id, week_start, activity_type, config, weekly_map=weekly_map)
+        weeks_active = (_weeks_active_in_activity(db, user_id, week_start, activity_type,
+                                                   weekly_map=weekly_map) if is_cold_start else 0)
         target_mi = round(_compute_weekly_budget(
             last_nonzero, is_cold_start, config.weekly_ramp_pct or 3.0, phase, is_deload, weeks_active), 1)
         frozen = False
@@ -423,6 +515,11 @@ def project_week_series(db, user_id, plan, weeks_back=8, weeks_forward=12) -> li
     config = _get_training_config(db, user_id)
     current_week_start = _week_start(local_today(user_id))
 
+    # Bucketed once and threaded through every week below. Each _week_mileage /
+    # _ramp_base_mileage call would otherwise re-scan and re-deduplicate the whole
+    # activity set, and this loop makes ~20 of them, each looking back up to 52 weeks.
+    weekly_map = weekly_mileage_map(db, user_id, activity_type)
+
     cursor = current_week_start - timedelta(weeks=weeks_back)
     end = current_week_start + timedelta(weeks=weeks_forward)
     weeks, rolling_base_mi = [], None
@@ -430,14 +527,13 @@ def project_week_series(db, user_id, plan, weeks_back=8, weeks_forward=12) -> li
     while cursor <= end:
         is_future = cursor > current_week_start
         if not is_future:
-            wv = plan_week_view(db, user_id, plan, cursor, config)
+            wv = plan_week_view(db, user_id, plan, cursor, config, weekly_map=weekly_map)
             phase, is_deload, frozen = wv["phase"], wv["isDeload"], wv["frozen"]
             target_mi, is_persisted = wv["targetMi"], wv["isPersisted"]
             # This plan's own discipline, not a hardcoded "Run" — a cycling goal's
             # "actual" must be cycling miles. float() so a zero-mileage week serializes
-            # as 0.0, not 0 — sum() over an empty set returns int, and a type that flips
-            # with the data is a nuisance for any consumer doing arithmetic on it.
-            actual_mi = float(round(_week_mileage(db, user_id, cursor, activity_type), 1))
+            # as 0.0, not 0 — a type that flips with the data is a nuisance downstream.
+            actual_mi = float(round(weekly_map.get(cursor, 0.0), 1))
         else:
             phase = _phase_for_date(db, user_id, cursor, goal=goal)
             is_deload = _is_deload_week(config, cursor)
@@ -503,14 +599,14 @@ def _generate_endurance(db, user_id, date, readiness_result, config, activity_ty
     # Computed regardless of which branch below actually sources the budget — needed
     # by both (Run's persisted WeeklyPlan doesn't record whether *it* used the
     # cold-start branch internally) for the day_share decision further down.
-    _, is_cold_start = _last_nonzero_week_mileage(db, user_id, week_start, activity_type)
+    _, is_cold_start = _ramp_base_mileage(db, user_id, week_start, activity_type, config)
 
     if activity_type == "Run":
         plan = _get_or_create_weekly_plan(db, user_id, week_start, phase, config)
         budget = plan.target_tss or 20.0
         is_deload = plan.is_deload
     else:
-        last_nonzero, _ = _last_nonzero_week_mileage(db, user_id, week_start, activity_type)
+        last_nonzero, _ = _ramp_base_mileage(db, user_id, week_start, activity_type, config)
         weeks_active = _weeks_active_in_activity(db, user_id, week_start, activity_type) if is_cold_start else 0
         is_deload = _is_deload_week(config, week_start)
         budget = _compute_weekly_budget(

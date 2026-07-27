@@ -105,7 +105,7 @@ def test_established_athlete_is_not_treated_as_cold_start(db, user_id, make_acti
     wk = date(2026, 6, 1)
     make_activity("strava_hist", "Run", date=wk.isoformat(), distance_mi=52.0)
 
-    mileage, is_cold_start = generator._last_nonzero_week_mileage(
+    mileage, is_cold_start = generator._ramp_base_mileage(
         db, user_id, wk + timedelta(weeks=1), "Run")
     assert is_cold_start is False, "an athlete with real mileage must never read as a cold start"
     assert mileage == 52.0

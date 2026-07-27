@@ -895,6 +895,7 @@ def _training_config_to_dict(c: UserTrainingConfig) -> dict:
         # ALTER TABLE ADD COLUMN (no DB-level default is set — see _migrate_add_missing_
         # columns), and the wire contract is a number, not null.
         "rideDaysPerWeek": c.ride_days_per_week or 0,
+        "seedWeeklyMiles": json.loads(c.seed_weekly_miles_json) if c.seed_weekly_miles_json else None,
     }
 
 

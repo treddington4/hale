@@ -92,6 +92,9 @@ async def update_training_config_endpoint(request: Request, user_id: str = Depen
     fields = {py_key: body[api_key] for api_key, py_key in field_map.items() if api_key in body}
     if "zones" in body:
         fields["zones_json"] = json.dumps(body["zones"]) if body["zones"] is not None else None
+    if "seedWeeklyMiles" in body:
+        seed = body["seedWeeklyMiles"]
+        fields["seed_weekly_miles_json"] = json.dumps(seed) if seed else None
     db = SessionLocal()
     try:
         return coach.update_training_config(db, user_id=user_id, **fields)
