@@ -162,17 +162,34 @@ DOWNGRADE_LADDER = ["interval", "tempo", "easy", "easy"]
 WEEKDAY_SKELETON = {0: "easy", 1: "quality", 2: "easy", 3: "cross_train", 4: "rest", 5: "long", 6: "easy"}
 
 
-def _phase_for_date(db, user_id, date) -> str:
-    goal = (
+def nearest_active_race_goal(db, user_id, date) -> Goal | None:
+    """The goal that drives periodization on `date` — the soonest upcoming active race
+    goal. Extracted from _phase_for_date (was inline) so P20's plan view can ask "which
+    goal is actually driving this week?" without duplicating the query.
+
+    `periodizes_training is not False` (P20): a NULL means yes, matching the legacy-NULL
+    convention used throughout this codebase, so existing rows are unaffected. Only an
+    explicit False opts a goal out — for a dated milestone that's worth counting down to
+    but wrong to build/peak/taper for."""
+    return (
         db.query(Goal)
         # target_date >= today: an "active" race goal whose date has already passed
         # (never marked completed) must not pin the phase to a degenerate/negative
         # "weeks until" indefinitely — only a genuinely upcoming race counts.
         .filter(Goal.goal_type == "race", Goal.status == "active", Goal.target_date >= date.isoformat(),
-                owned_by(Goal.user_id, user_id))
+                Goal.periodizes_training.is_not(False), owned_by(Goal.user_id, user_id))
         .order_by(Goal.target_date)
         .first()
     )
+
+
+def _phase_for_date(db, user_id, date, goal: Goal | None = None) -> str:
+    """`goal=None` keeps the original behavior exactly (resolve the nearest race goal),
+    which is what the live generator still passes. P20's plan view passes an explicit
+    goal so it can show the phase *for that plan's own goal*, which is not necessarily
+    the one currently driving the generator."""
+    if goal is None:
+        goal = nearest_active_race_goal(db, user_id, date)
     if not goal:
         return "base"
     race_date = datetime.strptime(goal.target_date, "%Y-%m-%d").date()
@@ -193,14 +210,26 @@ def _is_deload_week(config, week_start) -> bool:
 
 
 def _week_mileage(db, user_id, week_start, activity_type="Run") -> float:
+    """Normalizes `activity_type` before comparing, because P4 made the stored value
+    canonical-lowercase ("run"/"ride") at write time while every caller in this module
+    still passes source-style PascalCase ("Run"/"Ride").
+
+    That mismatch was a real, shipped bug: this returned 0.0 for every week, so
+    _last_nonzero_week_mileage always reported a cold start and the nightly generator
+    prescribed ~3-6 mile weeks to an athlete actually running ~52. Normalizing here (one
+    place) rather than at each call site means no caller can reintroduce it by passing
+    the casing that reads naturally. Same query-time normalization stats.py already
+    does — see its `_normalize_activity_type("Run") -> "run"` note."""
     week_end = week_start + timedelta(days=6)
+    wanted = stats._normalize_activity_type(activity_type)
     rows = (
         db.query(Run)
-        .filter(Run.activity_type == activity_type, Run.date >= week_start.isoformat(), Run.date <= week_end.isoformat(),
+        .filter(Run.date >= week_start.isoformat(), Run.date <= week_end.isoformat(),
                 owned_by(Run.user_id, user_id))
         .all()
     )
-    return sum(r.distance_mi or 0 for r in rows)
+    return sum(r.distance_mi or 0 for r in rows
+               if stats._normalize_activity_type(r.activity_type) == wanted)
 
 
 def _last_nonzero_week_mileage(db, user_id, before_week_start, activity_type, lookback_weeks=COLD_START_LOOKBACK_WEEKS):
@@ -271,6 +300,118 @@ def _get_or_create_weekly_plan(db, user_id, week_start, phase, config):
     db.add(plan)
     db.commit()
     return plan
+
+
+# ---------- P20: read-only plan view ----------
+#
+# These two are the only public (non-underscore) functions here, deliberately: they're
+# consumed by routes/plans.py. They live in generator.py rather than stats.py because the
+# pure functions they compose (_phase_for_date/_is_deload_week/_compute_weekly_budget/
+# _last_nonzero_week_mileage) already live here — moving them to stats.py would mean
+# reimplementing that math there, which is exactly the duplication CLAUDE.md's
+# "stats.py is the single computation core" rule exists to prevent (see GAP, its own
+# cautionary example). Neither function writes anything.
+
+PLAN_VIEW_MAX_WEEKS_FORWARD = 20
+PLAN_VIEW_MAX_WEEKS_BACK = 52
+
+
+def plan_week_view(db, user_id, plan, week_start, config=None) -> dict:
+    """One already-started or in-progress week for one TrainingPlan.
+
+    Reads the persisted WeeklyPlan row ONLY when this plan's goal is genuinely the one
+    driving periodization that week. WeeklyPlan is a single global stream per user (not
+    goal-scoped) whose target/deload/frozen belong to whatever goal won `nearest_active_
+    race_goal` at the time — so a plan for a non-driving goal that read those rows would
+    display another goal's numbers as its own, silently, which is worse than showing
+    nothing. Such a plan replays its own week deterministically instead."""
+    goal = db.get(Goal, plan.goal_id)
+    config = config or _get_training_config(db, user_id)
+    phase = _phase_for_date(db, user_id, week_start, goal=goal)
+    is_deload = _is_deload_week(config, week_start)
+
+    driving = nearest_active_race_goal(db, user_id, week_start)
+    persisted = None
+    if driving is not None and driving.id == plan.goal_id:
+        persisted = (
+            db.query(WeeklyPlan)
+            .filter(WeeklyPlan.user_id == user_id, WeeklyPlan.week_start == week_start.isoformat())
+            .first()
+        )
+
+    if persisted is not None:
+        # `frozen` is the one field here that genuinely cannot be recomputed — it records
+        # that a 2+-flag readiness day capped this week, which depends on that day's state.
+        target_mi, is_deload, frozen = persisted.target_tss or 0.0, bool(persisted.is_deload), bool(persisted.frozen)
+    else:
+        last_nonzero, is_cold_start = _last_nonzero_week_mileage(db, user_id, week_start, "Run")
+        weeks_active = _weeks_active_in_activity(db, user_id, week_start, "Run") if is_cold_start else 0
+        target_mi = round(_compute_weekly_budget(
+            last_nonzero, is_cold_start, config.weekly_ramp_pct or 3.0, phase, is_deload, weeks_active), 1)
+        frozen = False
+
+    return {"phase": phase, "isDeload": is_deload, "frozen": frozen,
+            "targetMi": target_mi, "isPersisted": persisted is not None}
+
+
+def project_week_series(db, user_id, plan, weeks_back=8, weeks_forward=12) -> list[dict]:
+    """Week-by-week target vs actual for one plan, spanning past and projected future.
+
+    Future weeks CANNOT be read from history: _compute_weekly_budget ramps off the last
+    nonzero week's real mileage, and a week 6 out has none — asking for it would return
+    today's last-nonzero week for every future week, producing a flat non-ramping line.
+    So future weeks chain off each other, each one's target feeding the next as its ramp
+    base. That assumes every week hits its target exactly, which is why isProjection is
+    on the wire and the UI states the assumption rather than presenting these as
+    commitments.
+
+    The chain deliberately reproduces an existing generator quirk rather than smoothing
+    it: _compute_weekly_budget applies the deload multiplier last, and the real generator
+    then ramps the following week off that deflated number, so a deload permanently
+    lowers the base instead of bouncing back. Projecting a bounce-back would show a
+    rosier future than the generator will actually deliver. If that quirk is worth
+    fixing, it's a generator-math change, not something to paper over in a view."""
+    weeks_forward = max(0, min(weeks_forward, PLAN_VIEW_MAX_WEEKS_FORWARD))
+    weeks_back = max(0, min(weeks_back, PLAN_VIEW_MAX_WEEKS_BACK))
+
+    goal = db.get(Goal, plan.goal_id)
+    config = _get_training_config(db, user_id)
+    current_week_start = _week_start(local_today(user_id))
+
+    cursor = current_week_start - timedelta(weeks=weeks_back)
+    end = current_week_start + timedelta(weeks=weeks_forward)
+    weeks, rolling_base_mi = [], None
+
+    while cursor <= end:
+        is_future = cursor > current_week_start
+        if not is_future:
+            wv = plan_week_view(db, user_id, plan, cursor, config)
+            phase, is_deload, frozen = wv["phase"], wv["isDeload"], wv["frozen"]
+            target_mi, is_persisted = wv["targetMi"], wv["isPersisted"]
+            # float() so a zero-mileage week serializes as 0.0, not 0 — sum() over an
+            # empty set returns int, and a type that flips with the data is a nuisance
+            # for any consumer doing arithmetic on it.
+            actual_mi = float(round(_week_mileage(db, user_id, cursor, "Run"), 1))
+        else:
+            phase = _phase_for_date(db, user_id, cursor, goal=goal)
+            is_deload = _is_deload_week(config, cursor)
+            target_mi = round(_compute_weekly_budget(
+                rolling_base_mi or 0.0, False, config.weekly_ramp_pct or 3.0, phase, is_deload, 0), 1)
+            frozen, is_persisted = False, False
+            # Not 0.0 — _week_mileage would honestly return 0 for a week that hasn't
+            # happened, but rendering "0 mi" reads as "you ran nothing", which is a claim
+            # about a week nobody has had the chance to run yet. null renders as a dash.
+            actual_mi = None
+        rolling_base_mi = target_mi
+
+        weeks.append({
+            "weekStart": cursor.isoformat(), "phase": phase, "isDeload": is_deload,
+            "frozen": frozen, "targetMi": target_mi, "actualMi": actual_mi,
+            "isProjection": is_future, "isPersisted": is_persisted,
+            "isCurrentWeek": cursor == current_week_start,
+        })
+        cursor += timedelta(weeks=1)
+    return weeks
 
 
 def _distribution_would_break(db, user_id, date, candidate_hard: bool) -> bool:

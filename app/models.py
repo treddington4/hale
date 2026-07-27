@@ -414,6 +414,14 @@ class Goal(Base):
     gel_carbs_g = Column(Integer, nullable=True)      # carbs per gel/product (default ~24g)
     electrolyte_sodium_mg = Column(Integer, nullable=True)  # sodium per tab/product (default ~400mg)
 
+    # P20 — does this goal drive training periodization? NULL/True = yes (the legacy-NULL
+    # convention used throughout this codebase), False = countdown only. Exists because
+    # generator._phase_for_date picks the *nearest* active race goal, and not every dated
+    # milestone a user tracks is something to periodize toward — a wedding is a real date
+    # worth counting down to, but building/peaking for it and then tapering is wrong. The
+    # header race countdown reads /api/goals and is unaffected by this flag.
+    periodizes_training = Column(Boolean, nullable=True)
+
 
 class Gear(Base):
     """Shoe/bike/bike-component lifecycle tracking (Phase 6.3). Mileage is always
@@ -574,9 +582,39 @@ class WeeklyPlan(Base):
     user_id = Column(String, ForeignKey("users.id", ondelete="CASCADE"), nullable=False)
     week_start = Column(String, nullable=False)  # YYYY-MM-DD, Monday
     target_tss = Column(Float, nullable=True)  # mileage proxy until Phase 6
+    # VESTIGIAL — never read this for anything real. Written exactly once, as a literal
+    # 0.0, when generator._get_or_create_weekly_plan creates the row; nothing has ever
+    # updated it since, so every row in existence reads 0.0. Real "actual" volume is
+    # computed live from activity rows via generator._week_mileage() (that's what the
+    # P20 plan view uses). Kept only because there's no migration framework here to drop
+    # a column with, and a dead column is cheaper than a hand-rolled DROP COLUMN.
     actual_tss = Column(Float, nullable=True)
     is_deload = Column(Boolean, default=False)
     frozen = Column(Boolean, default=False)
+
+
+class TrainingPlan(Base):
+    """P20 — the entity the Workouts tab's plan view is tied to, created by "Start a Plan".
+    Deliberately thin: this is a *visualization* of the periodization math the generator
+    already does, not a competing planner, and nothing in generator.py depends on this
+    table existing yet (P21 is where a started plan begins steering real prescriptions).
+
+    Restricted to race-type goals at the route layer — phase/deload/ramp math is
+    fundamentally "weeks until race date" and has no defined analog for a consistency or
+    distance_target goal.
+
+    A brand-new table, so create_all() picks it up with no _MIGRATABLE_TABLES entry
+    needed, same as ApiToken/PushSubscription. Add one the moment a column is added here.
+    Too new to have legacy-NULL user_id rows, so plain equality filtering (not owned_by())
+    is correct — matches ApiToken's convention."""
+    __tablename__ = "training_plans"
+    __table_args__ = (UniqueConstraint("user_id", "goal_id", name="uq_training_plan_user_goal"),)
+
+    id = Column(String, primary_key=True)  # f"plan_{uuid.uuid4().hex[:12]}"
+    user_id = Column(String, ForeignKey("users.id", ondelete="CASCADE"), nullable=False)
+    goal_id = Column(String, ForeignKey("goals.id", ondelete="CASCADE"), nullable=False)
+    status = Column(String, default="active")  # "active" | "archived"
+    created_at = Column(String)
 
 
 class DailyMetrics(Base):

@@ -9,7 +9,7 @@ from fastapi.middleware.gzip import GZipMiddleware
 from apscheduler.schedulers.background import BackgroundScheduler
 
 from .models import init_db
-from .routes import auth, sync, settings, wellness, chat, health, workouts, goals, dashboard, gear
+from .routes import auth, sync, settings, wellness, chat, health, workouts, goals, dashboard, gear, plans
 
 LOG_LEVEL = os.environ.get("LOG_LEVEL", "INFO").upper()
 logging.basicConfig(level=LOG_LEVEL)
@@ -29,6 +29,7 @@ app.include_router(workouts.router)
 app.include_router(goals.router)
 app.include_router(dashboard.router)
 app.include_router(gear.router)
+app.include_router(plans.router)
 
 
 @app.get("/health")
