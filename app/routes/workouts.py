@@ -87,7 +87,7 @@ async def update_training_config_endpoint(request: Request, user_id: str = Depen
         "maxHr": "max_hr", "thresholdHr": "threshold_hr", "ftpWatts": "ftp_watts",
         "weeklyRampPct": "weekly_ramp_pct", "mesocyclePattern": "mesocycle_pattern",
         "distribution": "distribution", "strengthDaysPerWeek": "strength_days_per_week",
-        "strengthTemplate": "strength_template",
+        "strengthTemplate": "strength_template", "rideDaysPerWeek": "ride_days_per_week",
     }
     fields = {py_key: body[api_key] for api_key, py_key in field_map.items() if api_key in body}
     if "zones" in body:

@@ -891,6 +891,10 @@ def _training_config_to_dict(c: UserTrainingConfig) -> dict:
         "weeklyRampPct": c.weekly_ramp_pct, "mesocyclePattern": c.mesocycle_pattern,
         "distribution": c.distribution, "strengthDaysPerWeek": c.strength_days_per_week,
         "strengthTemplate": c.strength_template,
+        # `or 0` for the legacy-NULL case: rows predating this column read NULL after
+        # ALTER TABLE ADD COLUMN (no DB-level default is set — see _migrate_add_missing_
+        # columns), and the wire contract is a number, not null.
+        "rideDaysPerWeek": c.ride_days_per_week or 0,
     }
 
 
@@ -911,6 +915,7 @@ def get_training_config(db, user_id: str = DEFAULT_USER_ID) -> dict:
         config = UserTrainingConfig(
             user_id=user_id, weekly_ramp_pct=3.0, mesocycle_pattern="3:1",
             distribution="pyramidal", strength_days_per_week=2, strength_template=default_template,
+            ride_days_per_week=0,
         )
     return _training_config_to_dict(config)
 

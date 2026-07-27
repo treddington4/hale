@@ -149,6 +149,13 @@ MESOCYCLE_LENGTHS = {"3:1": 4, "2:1": 3, "4:1": 5}
 COLD_START_INITIAL_MILES = 3.0
 COLD_START_WEEKLY_INCREMENT_MILES = 1.5
 COLD_START_LOOKBACK_WEEKS = 8  # weeks checked before concluding "no experience in this activity at all"
+
+# Shortest session worth prescribing, per discipline. The generator's distance math is
+# calibrated for running throughout (COLD_START_INITIAL_MILES above is a running number),
+# and the same figure means very different things on foot vs on a bike — 3 miles is a
+# real easy run and a ~12-minute bike ride. Only disciplines listed here get a floor;
+# an unlisted one keeps the pure computed value rather than inheriting a wrong default.
+MIN_SESSION_MILES = {"Ride": 8.0}
 _EPOCH_MONDAY = datetime(2020, 1, 6).date()  # any fixed Monday — used only to derive a stable week index
 
 # 1-flag readiness downgrade ladder: interval -> tempo -> easy (stands in for "Z2",
@@ -265,6 +272,16 @@ def _weeks_active_in_activity(db, user_id, before_week_start, activity_type, max
         if _week_mileage(db, user_id, wk_start, activity_type) > 0:
             count += 1
     return count
+
+
+def _sessions_per_week(config, activity_type: str) -> int | None:
+    """How many times a week this discipline is trained, when that's known. Returns None
+    for the primary discipline (running), whose frequency is set by WEEKDAY_SKELETON
+    rather than a config number — callers treat None as "use the normal day_share
+    slicing". See _session_share's use in _generate_endurance."""
+    if activity_type == "Ride":
+        return config.ride_days_per_week or 0
+    return None
 
 
 def _compute_weekly_budget(last_nonzero_mileage, is_cold_start, ramp_pct, phase, is_deload, weeks_active=0) -> float:
@@ -548,8 +565,25 @@ def _generate_endurance(db, user_id, date, readiness_result, config, activity_ty
             # absurd "first run" (3mi budget * 10% easy-day share = 0.3mi).
             target_distance_mi = round(budget, 1)
         else:
-            share = day_share.get(workout_type, 0.10)
-            target_distance_mi = round(budget * share, 1)
+            # day_share's fractions assume the discipline is trained ~6-7x/week, which is
+            # only true of the primary one. For a discipline done once a week the weekly
+            # budget IS the session, and slicing it again produces the same absurdity the
+            # cold-start branch above already guards against — confirmed against real data:
+            # a 3.1mi weekly ride budget * 0.10 easy share = a 0.3mi "bike ride".
+            sessions = _sessions_per_week(config, activity_type)
+            if sessions and sessions <= 1:
+                target_distance_mi = round(budget, 1)
+            else:
+                share = day_share.get(workout_type, 0.10)
+                target_distance_mi = round(budget * share, 1)
+        if target_distance_mi is not None:
+            floor = MIN_SESSION_MILES.get(activity_type)
+            if floor and target_distance_mi < floor:
+                # Distance floors are discipline-specific: 3 miles is a real easy run and
+                # a meaningless bike ride (~12 min). Without this, a user just starting a
+                # discipline gets prescriptions too short to be worth doing, and the ramp
+                # takes months to reach a useful session.
+                target_distance_mi = floor
 
     # Neither "rest" nor "cross_train" are really "a Run"/"a Ride" — normalizing both
     # to "Other" avoids a rest day (nothing done at all) misleadingly reading as
@@ -940,13 +974,49 @@ def run_quick_generate(db, user_id: str, domain: str, date=None, template_overri
     return {"date": target.isoformat(), "domain": domain, "readiness": readiness_result, "result": result}
 
 
+def _is_ride_day(config, date) -> bool:
+    """Whether the weekly secondary ride lands on this date. It takes over the skeleton's
+    cross_train slot, which otherwise generates a contentless "Cross-train (Other)"
+    placeholder — a real prescribed ride is strictly more useful there, and reusing the
+    slot means the ride costs no extra training day.
+
+    Only one ride/week is supported: WEEKDAY_SKELETON has exactly one cross_train slot,
+    so any value >1 still yields one ride. Placing N rides needs the real availability
+    model in docs/P21_CONCURRENT_GOALS.md, not a bigger number here."""
+    return bool(config.ride_days_per_week or 0) and WEEKDAY_SKELETON[date.weekday()] == "cross_train"
+
+
+def _clear_placeholder_cross_train(db, user_id, date_str) -> None:
+    """Drop a still-planned cross_train placeholder the Run path left on this date before
+    the ride was switched on. Without this, opting in leaves both the old empty
+    placeholder and the new ride on the same day, since they occupy different upsert
+    domains ("endurance" vs "endurance_ride"). Only ever removes a generator-created,
+    still-`planned`, distance-less cross_train row — never a completed one (history is
+    immutable) and never a user's own workout."""
+    existing = _existing_generator_workout(db, user_id, date_str, "endurance")
+    if existing is not None and existing.status == "planned" and existing.workout_type == "cross_train":
+        db.delete(existing)
+        db.commit()
+
+
 def run_for_user(db, user_id: str = DEFAULT_USER_ID, date=None) -> dict:
     target = date or local_today(user_id)
     if isinstance(target, str):
         target = datetime.strptime(target, "%Y-%m-%d").date()
     config = _get_training_config(db, user_id)
     readiness_result = stats.readiness(db, user_id, target)
-    endurance = _generate_endurance(db, user_id, target, readiness_result, config)
+
+    if _is_ride_day(config, target):
+        # ignore_schedule=True so the ride is a real "easy" session — without it the
+        # skeleton lookup returns cross_train for this very day and the ride would
+        # inherit the same empty placeholder it's replacing. Every readiness/health gate
+        # below that still applies unchanged.
+        endurance = _generate_endurance(db, user_id, target, readiness_result, config,
+                                         activity_type="Ride", ignore_schedule=True)
+        _clear_placeholder_cross_train(db, user_id, target.isoformat())
+    else:
+        endurance = _generate_endurance(db, user_id, target, readiness_result, config)
+
     strength = _generate_strength(db, user_id, target, readiness_result, config)
     return {"date": target.isoformat(), "readiness": readiness_result, "endurance": endurance, "strength": strength}
 

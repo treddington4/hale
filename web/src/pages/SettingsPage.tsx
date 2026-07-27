@@ -257,6 +257,7 @@ function TrainingSection() {
   const [thresholdHr, setThresholdHr] = useState("")
   const [weeklyRampPct, setWeeklyRampPct] = useState("")
   const [strengthDaysPerWeek, setStrengthDaysPerWeek] = useState("")
+  const [rideDaysPerWeek, setRideDaysPerWeek] = useState("")
   const [mesocyclePattern, setMesocyclePattern] = useState("3:1")
   const [distribution, setDistribution] = useState("pyramidal")
   const [saved, setSaved] = useState(false)
@@ -267,6 +268,7 @@ function TrainingSection() {
     setThresholdHr(config.thresholdHr?.toString() ?? "")
     setWeeklyRampPct(config.weeklyRampPct.toString())
     setStrengthDaysPerWeek(config.strengthDaysPerWeek.toString())
+    setRideDaysPerWeek(config.rideDaysPerWeek.toString())
     setMesocyclePattern(config.mesocyclePattern)
     setDistribution(config.distribution)
   }, [config])
@@ -278,6 +280,7 @@ function TrainingSection() {
         thresholdHr: thresholdHr ? Number(thresholdHr) : null,
         weeklyRampPct: Number(weeklyRampPct),
         strengthDaysPerWeek: Number(strengthDaysPerWeek),
+        rideDaysPerWeek: Number(rideDaysPerWeek),
         mesocyclePattern,
         distribution,
       },
@@ -311,6 +314,19 @@ function TrainingSection() {
             value={strengthDaysPerWeek}
             onChange={(e) => setStrengthDaysPerWeek(e.target.value)}
           />
+        </div>
+        <div className="flex flex-col gap-1.5">
+          <Label>Rides/week</Label>
+          <Input
+            type="number"
+            min={0}
+            max={1}
+            value={rideDaysPerWeek}
+            onChange={(e) => setRideDaysPerWeek(e.target.value)}
+          />
+          <span className="text-hale-faint text-[11px]">
+            0 = off. Uses the existing cross-train day, so it costs no extra training day.
+          </span>
         </div>
         <div className="flex flex-col gap-1.5">
           <Label>Mesocycle pattern</Label>

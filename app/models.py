@@ -551,6 +551,14 @@ class UserTrainingConfig(Base):
     distribution = Column(String, default="pyramidal")
     strength_days_per_week = Column(Integer, default=2)
     strength_template = Column(String, default="full_body_ab")  # selects the rotation in generator.py
+    # P21-lite — a secondary endurance discipline folded into the weekly rotation, filling
+    # the WEEKDAY_SKELETON cross_train slot that otherwise generates a contentless
+    # "Cross-train (Other)" placeholder. 0 = off (the historical behavior), so this
+    # changes nothing for a user who never sets it. Deliberately NOT a second training
+    # goal: it shares the one weekly schedule rather than running a parallel plan — see
+    # docs/P21_CONCURRENT_GOALS.md for the full multi-goal model this is a first step
+    # toward, and note only 1/week is meaningfully supported today (see _session_share).
+    ride_days_per_week = Column(Integer, default=0)
 
 
 class ExerciseProgress(Base):
@@ -801,7 +809,11 @@ def init_db():
 # otherwise never have gained is_test via ALTER TABLE.
 _MIGRATABLE_TABLES = [("runs", Run), ("daily_steps", DailySteps), ("chat_messages", ChatMessage),
                        ("goals", Goal), ("users", User), ("workouts", Workout),
-                       ("health_notes", HealthNote)]
+                       ("health_notes", HealthNote),
+                       # Added when ride_days_per_week landed — this table already existed in
+                       # every real deployment, so create_all() would never have added the
+                       # column and the generator would read a nonexistent attribute.
+                       ("user_training_config", UserTrainingConfig)]
 
 
 def _migrate_add_missing_columns():

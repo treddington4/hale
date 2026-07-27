@@ -401,6 +401,9 @@ export interface TrainingConfig {
   distribution: string
   strengthDaysPerWeek: number
   strengthTemplate: string
+  // 0 = off. When set, the weekly rotation's cross-train slot becomes a real prescribed
+  // ride instead of an empty placeholder. Only 1/week is meaningfully supported today.
+  rideDaysPerWeek: number
 }
 
 export interface RecoveryTool {
