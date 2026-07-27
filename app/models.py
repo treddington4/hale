@@ -404,6 +404,12 @@ class Goal(Base):
                                              # column) treated as 0 at read/sort time, same pattern
                                              # as everywhere else in this codebase
 
+    # P17 — Race-Day Pack: race event details for pacing/weather/taper planning
+    target_time_sec = Column(Integer, nullable=True)  # race goal time in seconds (e.g., 2:15 half = 8100 sec)
+    race_lat = Column(Float, nullable=True)           # race location latitude (forward-geocoded from name)
+    race_lon = Column(Float, nullable=True)           # race location longitude (forward-geocoded from name)
+    race_location_label = Column(String, nullable=True)  # display label for the race location
+
 
 class Gear(Base):
     """Shoe/bike/bike-component lifecycle tracking (Phase 6.3). Mileage is always

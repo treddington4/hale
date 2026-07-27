@@ -111,3 +111,43 @@ def delete_goal(goal_id: str, user_id: str = Depends(auth.current_user_id)):
         return {"deleted": True}
     finally:
         db.close()
+
+
+@router.get("/api/goals/{goal_id}/race-pack")
+def get_race_pack(goal_id: str, user_id: str = Depends(auth.current_user_id)):
+    """P17: Race-Day Pack — pacing, taper countdown, weather forecast for a race goal."""
+    from .. import race_pack
+    from ..sync import weather
+
+    db = SessionLocal()
+    try:
+        g = db.query(Goal).filter(Goal.id == goal_id, owned_by(Goal.user_id, user_id)).first()
+        if not g:
+            raise HTTPException(404, "Goal not found")
+        if g.goal_type != "race":
+            raise HTTPException(400, "Only race goals have a race pack")
+
+        result = {"id": goal_id, "name": g.name, "raceDate": g.target_date}
+
+        # Pacing plan
+        if g.target_time_sec and g.target_value:
+            activity_type = (json.loads(g.activity_types_json or "[]") or ["Run"])[0]
+            pacing = race_pack.compute_pacing_plan(g.target_time_sec, g.target_value, activity_type)
+            result["pacing"] = pacing
+        else:
+            result["pacing"] = {"strategy": None, "explanation": "Set a target time and distance to generate a pacing plan"}
+
+        # Taper countdown
+        result["taper"] = race_pack.compute_taper(g.target_date)
+
+        # Weather forecast
+        if g.race_lat and g.race_lon and g.target_date:
+            forecast = weather.get_weather_forecast(g.race_lat, g.race_lon, g.target_date)
+            result["forecast"] = forecast
+            result["raceLocation"] = g.race_location_label
+        else:
+            result["forecast"] = {"available": False, "reason": "Race location not set"}
+
+        return result
+    finally:
+        db.close()

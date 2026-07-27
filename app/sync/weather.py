@@ -97,3 +97,87 @@ def _weathercode_to_text(code):
         95: "Thunderstorm", 96: "Thunderstorm w/ hail", 99: "Thunderstorm w/ hail",
     }
     return mapping.get(code, "Unknown")
+
+
+def get_weather_forecast(lat: float, lon: float, date: str):
+    """P17: Fetch weather forecast for a race day via Open-Meteo's forecast API
+    (different host from the archive API). Returns dict with forecast data or
+    {"available": False, "reason": "..."} if unavailable.
+    
+    date: "YYYY-MM-DD" (must be within ~16 days of today)
+    
+    Returns: {
+        "available": True,
+        "date": "2026-08-15",
+        "tempF": 72,
+        "condition": "Partly cloudy",
+        "heatIndexF": 74,
+        "wetBulbF": 65,
+        "humidity": 55
+    } or {"available": False, "reason": "..."}
+    """
+    if lat is None or lon is None:
+        return {"available": False, "reason": "Race location not set"}
+    
+    try:
+        from datetime import datetime as dt
+        today = dt.now().date()
+        forecast_date = dt.strptime(date, "%Y-%m-%d").date()
+        days_out = (forecast_date - today).days
+        
+        if days_out < 0:
+            return {"available": False, "reason": "Date is in the past"}
+        if days_out > 16:
+            return {"available": False, "reason": "Forecast not available beyond 16 days"}
+        
+        resp = requests.get(
+            "https://api.open-meteo.com/v1/forecast",
+            params={
+                "latitude": lat,
+                "longitude": lon,
+                "start_date": date,
+                "end_date": date,
+                "daily": "weather_code,temperature_2m_max,temperature_2m_min,relative_humidity_2m_max,relative_humidity_2m_min",
+                "temperature_unit": "fahrenheit",
+                "timezone": "auto",
+            },
+            timeout=10,
+        )
+        resp.raise_for_status()
+        data = resp.json()
+        
+        daily = data.get("daily", {})
+        if not daily or not daily.get("time"):
+            return {"available": False, "reason": "No forecast data"}
+        
+        # Extract day 0 data (the requested date)
+        codes = daily.get("weather_code", [])
+        temps_max = daily.get("temperature_2m_max", [])
+        temps_min = daily.get("temperature_2m_min", [])
+        humidity_max = daily.get("relative_humidity_2m_max", [])
+        humidity_min = daily.get("relative_humidity_2m_min", [])
+        
+        if not temps_max:
+            return {"available": False, "reason": "No temperature data"}
+        
+        code = codes[0] if codes else None
+        temp_max = temps_max[0]
+        temp_min = temps_min[0] if temps_min else temp_max
+        humidity = humidity_max[0] if humidity_max else None
+        
+        condition = _weathercode_to_text(code)
+        heat_index = _heat_index_f(temp_max, humidity) if humidity else None
+        wet_bulb = _wet_bulb_f(temp_max, humidity) if humidity else None
+        
+        return {
+            "available": True,
+            "date": date,
+            "tempMaxF": round(temp_max, 1),
+            "tempMinF": round(temp_min, 1),
+            "condition": condition,
+            "heatIndexF": round(heat_index, 1) if heat_index else None,
+            "wetBulbF": round(wet_bulb, 1) if wet_bulb else None,
+            "humidity": humidity,
+        }
+    except Exception:
+        return {"available": False, "reason": "Could not fetch forecast"}
