@@ -141,12 +141,27 @@ def get_race_pack(goal_id: str, user_id: str = Depends(auth.current_user_id)):
         result["taper"] = race_pack.compute_taper(g.target_date)
 
         # Weather forecast
+        heat_index = None
         if g.race_lat and g.race_lon and g.target_date:
             forecast = weather.get_weather_forecast(g.race_lat, g.race_lon, g.target_date)
             result["forecast"] = forecast
             result["raceLocation"] = g.race_location_label
+            heat_index = forecast.get("heatIndexF") or 70
         else:
             result["forecast"] = {"available": False, "reason": "Race location not set"}
+            heat_index = 70
+
+        # Fueling plan
+        if g.target_time_sec:
+            fueling = race_pack.compute_fueling_plan(
+                g.target_time_sec,
+                heat_index=heat_index,
+                gel_carbs_g=g.gel_carbs_g,
+                electrolyte_sodium_mg=g.electrolyte_sodium_mg
+            )
+            result["fueling"] = fueling
+        else:
+            result["fueling"] = {"disclaimer": race_pack._FUELING_DISCLAIMER, "error": "Set a target race time to generate a fueling plan"}
 
         return result
     finally:

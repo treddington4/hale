@@ -175,12 +175,14 @@ def run_detail(db, run_id: str, user_id: str = DEFAULT_USER_ID) -> dict | None:
     get_run_detail chat tool and the "ask coach about this activity" hidden context
     block (coach/core.py's get_activity_context_block), so both see identical data.
     P7c: Use Activity for polymorphic query across all activity types.
-    P14: Includes linkedWorkout if this run was linked to a prescribed workout."""
+    P14: Includes linkedWorkout if this run was linked to a prescribed workout.
+    P19: Includes bodyBatteryImpact (net delta during activity)."""
     r = db.query(Activity).filter(Activity.id == run_id, owned_by(Activity.user_id, user_id)).first()
     if not r:
         return None
     hr_floor = get_hr_floor(db, user_id)
     linked_workout = _linked_workout_for_run(db, run_id, user_id)
+    body_battery_impact = extract_body_battery_impact(r)
     return {
         "id": r.id, "date": r.date, "name": r.name, "activityType": r.activity_type,
         "distanceMi": r.distance_mi, "movingTimeSec": r.moving_time_sec,
@@ -191,6 +193,7 @@ def run_detail(db, run_id: str, user_id: str = DEFAULT_USER_ID) -> dict | None:
         "type": r.type_override or r.suggested_type, "rpe": r.rpe, "notes": r.notes,
         "splits": json.loads(r.splits_json or "[]"),
         "linkedWorkout": linked_workout,
+        "bodyBatteryImpact": body_battery_impact,
     }
 
 
@@ -1038,5 +1041,36 @@ def fetch_article_text(url: str, max_chars: int = 5000) -> str | None:
         
         # Truncate to max_chars and return
         return text[:max_chars] if text else None
+    except Exception:
+        return None
+
+
+def extract_body_battery_impact(activity_row) -> dict | None:
+    """P19: Extract net body battery impact from an activity's intraday series.
+    
+    Returns: {"startValue": 75, "endValue": 42, "delta": -33, "recovered": False}
+    or None if insufficient data (no series, or values at start/end can't be determined).
+    """
+    if not activity_row or not activity_row.body_battery_json:
+        return None
+
+    try:
+        import json
+        series = json.loads(activity_row.body_battery_json or "[]")
+        if not series or len(series) < 2:
+            return None
+
+        # Series is [[timestamp_ms, value], ...]
+        # Get start and end values
+        start_value = series[0][1]
+        end_value = series[-1][1]
+        delta = end_value - start_value
+
+        return {
+            "startValue": start_value,
+            "endValue": end_value,
+            "delta": delta,
+            "recovered": delta > 0,
+        }
     except Exception:
         return None

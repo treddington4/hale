@@ -410,6 +410,10 @@ class Goal(Base):
     race_lon = Column(Float, nullable=True)           # race location longitude (forward-geocoded from name)
     race_location_label = Column(String, nullable=True)  # display label for the race location
 
+    # P18 — Fueling plan: product sizes for carbs/electrolytes
+    gel_carbs_g = Column(Integer, nullable=True)      # carbs per gel/product (default ~24g)
+    electrolyte_sodium_mg = Column(Integer, nullable=True)  # sodium per tab/product (default ~400mg)
+
 
 class Gear(Base):
     """Shoe/bike/bike-component lifecycle tracking (Phase 6.3). Mileage is always
