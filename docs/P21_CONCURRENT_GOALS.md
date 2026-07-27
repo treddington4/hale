@@ -158,6 +158,44 @@ rather than silently shortchanging one:
 - The honest options are: raise the cap, demote/drop the supporting goal, or move its
   date. That's the user's call, not the generator's.
 
+## 3.4 Planned interruptions — narrower than first designed
+
+`P20_P21_DESIGN.md` §2.2 specified a `PlanAvailabilityWindow` with a
+`volume_multiplier`, and a `INTERRUPTION_RAMP_SKIP_THRESHOLD` to exclude those weeks
+from the ramp-base search. Probing the actual honeymoon case (Greece, ~2026-09-12 to
+~2026-09-26) showed that's broader than needed, because the two disciplines fail
+differently:
+
+```
+Back home, week of 2026-09-28 — what does the ramp build from?
+  Run    ramp base =  4.0   pre-honeymoon was 30.0  -> CRATERED
+  Ride   ramp base = 10.0   pre-honeymoon was 10.0  -> OK
+```
+
+**A discipline that drops to exactly zero is already handled.** No bike is available in
+Greece, so cycling goes to 0.0 for both weeks, and `_last_nonzero_week_mileage`'s
+backward walk skips zero weeks by construction (its Phase 14 docstring is explicit
+about this) — it reaches past the gap to the last real week. Nothing to build.
+
+**Only *partial* reduction breaks the ramp.** Running continues at a token level, and a
+4-mile week is nonzero, so it becomes the ramp base and the post-honeymoon build starts
+from 4mi instead of ~30mi. Running a little is worse for this algorithm than not
+running at all.
+
+So the interruption window only needs to cover disciplines that will be *reduced but
+not stopped*, and its job is narrower than "scale the target": it marks weeks as **not
+a valid ramp base**, leaving their displayed target honest. Availability is per
+discipline, not one multiplier for the whole window — the same two weeks are a total
+stop for cycling and a partial cut for running.
+
+Worth noting the underlying fragility is general, not honeymoon-specific:
+`_last_nonzero_week_mileage` treats the single most recent nonzero week as gospel, so
+any one-off light week (illness, travel, a work crunch) drags the base down the same
+way. Fixing it generally — e.g. a trailing median rather than the latest value — would
+address all of them at once, but it changes the Phase 14 behavior deliberately designed
+to tell "didn't run last week" apart from "never done this," so it needs its own
+scoped decision rather than being smuggled in with an interruption feature.
+
 ## 4. What P20 keeps
 
 - `plan_week_view`/`project_week_series`'s attribution rule (never read another goal's
