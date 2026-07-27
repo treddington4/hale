@@ -322,23 +322,44 @@ PLAN_VIEW_MAX_WEEKS_FORWARD = 20
 PLAN_VIEW_MAX_WEEKS_BACK = 52
 
 
+def plan_activity_type(goal) -> str:
+    """Which discipline a goal is actually about. A race goal is not necessarily a
+    *running* race — Goal.activity_types_json has carried this since the goal table was
+    written (its own comment cites ["Run","Ride"] for a duathlon), but P20's first cut
+    hardcoded "Run" throughout the plan view, so a 50-mile-ride goal rendered the user's
+    running mileage under the cycling goal's name. Falls back to "Run" only when the
+    column is empty/unparseable, never as a silent default for a real other value."""
+    try:
+        types = json.loads(goal.activity_types_json or "[]") if goal else []
+    except (ValueError, TypeError):
+        types = []
+    return types[0] if types else "Run"
+
+
 def plan_week_view(db, user_id, plan, week_start, config=None) -> dict:
     """One already-started or in-progress week for one TrainingPlan.
 
-    Reads the persisted WeeklyPlan row ONLY when this plan's goal is genuinely the one
-    driving periodization that week. WeeklyPlan is a single global stream per user (not
-    goal-scoped) whose target/deload/frozen belong to whatever goal won `nearest_active_
-    race_goal` at the time — so a plan for a non-driving goal that read those rows would
-    display another goal's numbers as its own, silently, which is worse than showing
-    nothing. Such a plan replays its own week deterministically instead."""
+    Reads the persisted WeeklyPlan row only when BOTH hold:
+
+    1. This plan's goal is genuinely the one driving periodization that week. WeeklyPlan
+       is a single global stream per user (not goal-scoped) whose target/deload/frozen
+       belong to whatever goal won `nearest_active_race_goal` at the time, so a plan for
+       a non-driving goal that read those rows would display another goal's numbers as
+       its own, silently — worse than showing nothing.
+    2. This plan's discipline is running. WeeklyPlan is Run-only by construction
+       (_get_or_create_weekly_plan hardcodes "Run"); its target is a *running* budget,
+       so a cycling plan reading it would be the same category of lie as (1).
+
+    Otherwise the week is replayed deterministically from this plan's own discipline."""
     goal = db.get(Goal, plan.goal_id)
+    activity_type = plan_activity_type(goal)
     config = config or _get_training_config(db, user_id)
     phase = _phase_for_date(db, user_id, week_start, goal=goal)
     is_deload = _is_deload_week(config, week_start)
 
     driving = nearest_active_race_goal(db, user_id, week_start)
     persisted = None
-    if driving is not None and driving.id == plan.goal_id:
+    if activity_type == "Run" and driving is not None and driving.id == plan.goal_id:
         persisted = (
             db.query(WeeklyPlan)
             .filter(WeeklyPlan.user_id == user_id, WeeklyPlan.week_start == week_start.isoformat())
@@ -350,13 +371,13 @@ def plan_week_view(db, user_id, plan, week_start, config=None) -> dict:
         # that a 2+-flag readiness day capped this week, which depends on that day's state.
         target_mi, is_deload, frozen = persisted.target_tss or 0.0, bool(persisted.is_deload), bool(persisted.frozen)
     else:
-        last_nonzero, is_cold_start = _last_nonzero_week_mileage(db, user_id, week_start, "Run")
-        weeks_active = _weeks_active_in_activity(db, user_id, week_start, "Run") if is_cold_start else 0
+        last_nonzero, is_cold_start = _last_nonzero_week_mileage(db, user_id, week_start, activity_type)
+        weeks_active = _weeks_active_in_activity(db, user_id, week_start, activity_type) if is_cold_start else 0
         target_mi = round(_compute_weekly_budget(
             last_nonzero, is_cold_start, config.weekly_ramp_pct or 3.0, phase, is_deload, weeks_active), 1)
         frozen = False
 
-    return {"phase": phase, "isDeload": is_deload, "frozen": frozen,
+    return {"phase": phase, "isDeload": is_deload, "frozen": frozen, "activityType": activity_type,
             "targetMi": target_mi, "isPersisted": persisted is not None}
 
 
@@ -381,6 +402,7 @@ def project_week_series(db, user_id, plan, weeks_back=8, weeks_forward=12) -> li
     weeks_back = max(0, min(weeks_back, PLAN_VIEW_MAX_WEEKS_BACK))
 
     goal = db.get(Goal, plan.goal_id)
+    activity_type = plan_activity_type(goal)
     config = _get_training_config(db, user_id)
     current_week_start = _week_start(local_today(user_id))
 
@@ -394,10 +416,11 @@ def project_week_series(db, user_id, plan, weeks_back=8, weeks_forward=12) -> li
             wv = plan_week_view(db, user_id, plan, cursor, config)
             phase, is_deload, frozen = wv["phase"], wv["isDeload"], wv["frozen"]
             target_mi, is_persisted = wv["targetMi"], wv["isPersisted"]
-            # float() so a zero-mileage week serializes as 0.0, not 0 — sum() over an
-            # empty set returns int, and a type that flips with the data is a nuisance
-            # for any consumer doing arithmetic on it.
-            actual_mi = float(round(_week_mileage(db, user_id, cursor, "Run"), 1))
+            # This plan's own discipline, not a hardcoded "Run" — a cycling goal's
+            # "actual" must be cycling miles. float() so a zero-mileage week serializes
+            # as 0.0, not 0 — sum() over an empty set returns int, and a type that flips
+            # with the data is a nuisance for any consumer doing arithmetic on it.
+            actual_mi = float(round(_week_mileage(db, user_id, cursor, activity_type), 1))
         else:
             phase = _phase_for_date(db, user_id, cursor, goal=goal)
             is_deload = _is_deload_week(config, cursor)
@@ -413,6 +436,7 @@ def project_week_series(db, user_id, plan, weeks_back=8, weeks_forward=12) -> li
         weeks.append({
             "weekStart": cursor.isoformat(), "phase": phase, "isDeload": is_deload,
             "frozen": frozen, "targetMi": target_mi, "actualMi": actual_mi,
+            "activityType": activity_type,
             "isProjection": is_future, "isPersisted": is_persisted,
             "isCurrentWeek": cursor == current_week_start,
         })
