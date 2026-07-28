@@ -229,6 +229,17 @@ export interface PlanGoalRef {
   isActivePeriodizationGoal: boolean
 }
 
+// Hours demand vs. the declared cap. Covers HALE's OWN prescribed sessions only —
+// Garmin and the coach also write sessions for the same days and the athlete does one
+// of them, so summing every source would roughly triple the figure. The UI must say so.
+export interface PlanHours {
+  capHours: number
+  demandHours: number
+  unknownSessions: number // sessions with no derivable duration -> demandHours is a floor
+  overBy: number | null
+  isOverCap: boolean
+}
+
 export interface TrainingPlan {
   id: string
   status: "active" | "archived"
@@ -237,6 +248,8 @@ export interface TrainingPlan {
   availableDays: number[] | null // 0=Mon..6=Sun; null = every day available
   longRunDay: number | null // 0=Mon..6=Sun; null = today's hardcoded skeleton default
   sleepConstraintMode: "soft" | "off"
+  hours: PlanHours | null // null when no cap is set — nothing to be over
+  typicalWakeTime: string | null // "HH:MM" local; null until enough real nights exist
   goals: PlanGoalRef[]
 }
 

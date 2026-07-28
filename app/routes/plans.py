@@ -15,6 +15,7 @@ from fastapi import APIRouter, HTTPException, Request, Depends
 
 from ..models import SessionLocal, Goal, TrainingPlan, PlanGoal, DEFAULT_USER_ID
 from ..accounts import auth
+from .. import stats
 from ..coach import generator
 from ..util import local_today
 
@@ -62,6 +63,12 @@ def _plan_to_dict(db, p: TrainingPlan, user_id: str) -> dict:
         "availableDays": _json_or_none(p.available_days_json),
         "longRunDay": p.long_run_day,
         "sleepConstraintMode": p.sleep_constraint_mode or "soft",
+        # None when no cap is set (nothing to be over) — see generator.weekly_hours_plan,
+        # and note it covers HALE's own prescribed sessions only, not Garmin's parallel plan.
+        "hours": generator.weekly_hours_plan(
+            db, user_id, generator._week_start(local_today(user_id)), plan=p),
+        # None until enough real nights exist; never guessed from a couple of nights.
+        "typicalWakeTime": stats.typical_wake_time(db, user_id),
         "goals": goals,
     }
 

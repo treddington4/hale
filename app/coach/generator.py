@@ -182,6 +182,11 @@ DOWNGRADE_LADDER = ["interval", "tempo", "easy", "easy"]
 # is a deliberately small v1 template, not a full training-plan generator.
 WEEKDAY_SKELETON = {0: "easy", 1: "quality", 2: "easy", 3: "cross_train", 4: "rest", 5: "long", 6: "easy"}
 
+# "HH:MM" local. Past this, a long run on that day gets an informational note (never a
+# schedule change) — see the sleep block in _generate_endurance. String comparison is
+# safe only because both sides are zero-padded HH:MM from typical_wake_time.
+LATE_WAKE_THRESHOLD = "08:00"
+
 
 def nearest_active_race_goal(db, user_id, date) -> Goal | None:
     """The goal that drives periodization on `date` — the soonest upcoming active race
@@ -755,6 +760,63 @@ def workout_duration_hours(workout) -> float | None:
     return None
 
 
+def weekly_hours_plan(db, user_id, week_start, plan=None) -> dict | None:
+    """P21 §3.3 — what HALE's own prescribed week costs in hours, against the plan's
+    declared `weekly_hours_cap`. Returns None when no plan exists or no cap is set: with
+    no cap there is nothing to be over, and inventing one from training history is the
+    fabrication this whole design refuses (see TrainingPlan.weekly_hours_cap).
+
+    **Counts only `source="generator"` sessions, deliberately.** Up to three planners
+    write rows for the same date — Garmin's adaptive plan, a coach/chat-scheduled
+    session, and HALE's own — and the athlete does *one* of them, not all three
+    (confirmed in production: 2026-07-28 held a Garmin 76min easy, a Coach 78min
+    interval, and a HALE 3.7mi easy simultaneously). Summing every source would report
+    ~3.9 hours for a single day and turn the cap into noise. So this answers a bounded,
+    honest question — "does the plan HALE prescribes fit your week?" — and the UI has to
+    say that's what it is rather than implying it covers everything you'll actually do.
+
+    `unknownSessions` is reported rather than silently treated as zero: a session whose
+    duration can't be derived (workout_duration_hours returns None) makes the total a
+    floor, not a complete figure, and a cap comparison that hid that would understate
+    the demand. Real case at time of writing — strength rows generated before
+    target_duration_sec was populated."""
+    plan = plan if plan is not None else _active_training_plan(db, user_id)
+    if plan is None or plan.weekly_hours_cap is None:
+        return None
+
+    week_end = week_start + timedelta(days=6)
+    rows = (
+        db.query(Workout)
+        .filter(Workout.scheduled_date >= week_start.isoformat(),
+                Workout.scheduled_date <= week_end.isoformat(),
+                Workout.source == GENERATOR_SOURCE,
+                Workout.workout_type != "rest",
+                owned_by(Workout.user_id, user_id))
+        .all()
+    )
+    hours, unknown = 0.0, 0
+    for w in rows:
+        h = workout_duration_hours(w)
+        if h is None:
+            unknown += 1
+        else:
+            hours += h
+
+    cap = float(plan.weekly_hours_cap)
+    demand = round(hours, 2)
+    return {
+        "capHours": cap,
+        "demandHours": demand,
+        "unknownSessions": unknown,
+        "overBy": round(demand - cap, 2) if demand > cap else None,
+        # A conflict is *surfaced*, never auto-resolved. Silently shrinking the primary
+        # goal's long run to fit a cap is explicitly rejected in the design doc: the
+        # honest options (raise the cap, drop a supporting goal, move a race date) are
+        # the athlete's call, not the generator's.
+        "isOverCap": demand > cap,
+    }
+
+
 def _distribution_would_break(db, user_id, date, candidate_hard: bool) -> bool:
     """Coarse day-type-ratio approximation of a real time-in-zone distribution audit
     (see module docstring). tempo/interval count as "hard"; everything else (incl.
@@ -844,6 +906,18 @@ def _generate_endurance(db, user_id, date, readiness_result, config, activity_ty
 
     if is_deload and workout_type == "long":
         trigger_notes.append("Deload week — trimmed long run.")
+
+    # P21 §2.4 — sleep awareness is a SOFT note and nothing else: it never changes the
+    # workout type, the distance, or which day this lands on. long_run_day is an explicit
+    # user choice, and a derived multi-week average must not silently override an explicit
+    # choice. Deliberately no "hard" mode exists (see TrainingPlan.sleep_constraint_mode).
+    if (workout_type == "long" and training_plan is not None
+            and (training_plan.sleep_constraint_mode or "soft") == "soft"):
+        wake = stats.typical_wake_time(db, user_id, weekday=date.weekday())
+        if wake and wake > LATE_WAKE_THRESHOLD:
+            trigger_notes.append(
+                f"Heads up — you typically wake around {wake} on this day, so an early "
+                f"long run may cut sleep short. Schedule unchanged.")
 
     target_distance_mi = None
     if workout_type not in ("rest",) and workout_type != "cross_train":

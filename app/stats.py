@@ -14,6 +14,7 @@ so backend aggregates and merged UI counts are now in sync.
 import json
 import logging
 from datetime import datetime, timedelta, timezone
+from statistics import median
 
 from sqlalchemy import func
 
@@ -21,7 +22,7 @@ from .models import (
     Activity, Run, DailySteps, Goal, Gear, UserTrainingConfig, DEFAULT_USER_ID, owned_by,
     SessionLocal, get_sync_meta, set_sync_meta, user_key,
 )
-from .util import local_today, compute_tss, compute_efficiency_factor
+from .util import local_today, user_timezone, compute_tss, compute_efficiency_factor
 
 log = logging.getLogger("runlog")
 
@@ -1046,6 +1047,82 @@ def fetch_article_text(url: str, max_chars: int = 5000) -> str | None:
         return text[:max_chars] if text else None
     except Exception:
         return None
+
+
+TYPICAL_WAKE_LOOKBACK_DAYS = 28
+TYPICAL_WAKE_MIN_NIGHTS = 5
+
+
+def _parse_garmin_timestamp(raw: str):
+    """Garmin's sleep-segment timestamps look like "2026-07-27T10:29:53.0" — one
+    fractional-second digit. `datetime.fromisoformat` only accepts 0, 3, or 6 of them
+    before Python 3.11, so parsing this directly works in the 3.12 container and raises
+    on 3.10, making correctness quietly dependent on the interpreter version. Dropping
+    the fractional part sidesteps that entirely; sub-second precision is meaningless for
+    a wake-time habit measured in minutes. Returns a naive datetime (GMT by contract —
+    the caller attaches the timezone) or None."""
+    if not isinstance(raw, str):
+        return None
+    cleaned = raw.strip().replace("Z", "")
+    if "." in cleaned:
+        cleaned = cleaned.split(".", 1)[0]
+    try:
+        return datetime.fromisoformat(cleaned)
+    except (TypeError, ValueError):
+        return None
+
+
+def typical_wake_time(db, user_id: str = DEFAULT_USER_ID, lookback_days: int = TYPICAL_WAKE_LOOKBACK_DAYS,
+                      min_nights: int = TYPICAL_WAKE_MIN_NIGHTS, weekday: int | None = None) -> str | None:
+    """P21 — the athlete's habitual wake time as "HH:MM" local, or None.
+
+    Median (not mean) of each night's final sleep segment end: one 4am airport wake-up
+    or one sick day sleeping until noon shouldn't move a multi-week habit, and the same
+    outlier-robustness argument already settled the ramp base's median-vs-mean question.
+
+    **The timestamps are GMT.** garmin_sync._extract_sleep_stages stores Garmin's raw
+    `startGMT`/`endGMT` with no conversion, so reading them naively is off by the UTC
+    offset — for a US-Eastern athlete a real 06:29 wake-up reads as 10:29, which would
+    make an early riser look like they sleep till mid-morning and fire a late-sleeper
+    warning at exactly the wrong person. Converted to the user's own timezone here.
+
+    Returns None below `min_nights` of real data rather than guessing from two nights —
+    same "never fabricate a number" rule the dashboard cards follow. `weekday` (0=Mon)
+    narrows to one day of the week, since weekend and weekday wake times genuinely
+    differ and a long run is scheduled on a specific day."""
+    from zoneinfo import ZoneInfo
+    tz = ZoneInfo(user_timezone(user_id))
+    cutoff = (local_today(user_id) - timedelta(days=lookback_days)).isoformat()
+    rows = (
+        db.query(DailySteps)
+        .filter(DailySteps.date >= cutoff, DailySteps.sleep_stages_json.isnot(None),
+                owned_by(DailySteps.user_id, user_id))
+        .all()
+    )
+
+    minutes = []
+    for r in rows:
+        try:
+            segments = json.loads(r.sleep_stages_json or "[]")
+        except (TypeError, ValueError):
+            continue
+        if not segments:
+            continue
+        raw_end = segments[-1].get("end")
+        if not raw_end:
+            continue
+        naive = _parse_garmin_timestamp(raw_end)
+        if naive is None:
+            continue
+        local = naive.replace(tzinfo=timezone.utc).astimezone(tz)
+        if weekday is not None and local.weekday() != weekday:
+            continue
+        minutes.append(local.hour * 60 + local.minute)
+
+    if len(minutes) < min_nights:
+        return None
+    mid = int(median(sorted(minutes)))
+    return f"{mid // 60:02d}:{mid % 60:02d}"
 
 
 def extract_body_battery_impact(daily_steps_row) -> dict | None:

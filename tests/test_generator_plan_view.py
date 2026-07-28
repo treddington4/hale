@@ -439,3 +439,90 @@ def test_day_share_still_sums_to_the_full_budget_under_a_custom_skeleton():
                 if generator._skeleton_workout_type(d, phase, sk) not in ("rest", "cross_train")
             )
             assert total == pytest.approx(1.0), f"{phase} skeleton {sk} summed to {total}"
+
+
+# ---------- P21 hours cap (design doc 3.3) ----------
+
+
+@pytest.fixture()
+def plan_with_cap(db, user_id, make_goal, make_plan, today):
+    def _make(cap):
+        plan = make_plan(make_goal("Marathon", today + timedelta(weeks=20)))
+        plan.weekly_hours_cap = cap
+        db.commit()
+        return plan
+    return _make
+
+
+def _gen_workout(db, user_id, date_iso, **kw):
+    from app.models import Workout
+    w = Workout(id=f"workout_{uuid.uuid4().hex[:12]}", user_id=user_id, scheduled_date=date_iso,
+                source="generator", status="planned", created_at="2026-01-01T00:00:00+00:00",
+                workout_type=kw.pop("workout_type", "easy"), activity_type="Run", **kw)
+    db.add(w)
+    db.commit()
+    return w
+
+
+def test_no_cap_means_no_conflict_object_at_all(db, user_id, today, make_goal, make_plan):
+    """No cap set is not 'a cap of zero' and not 'over budget' — there is simply nothing
+    to compare against, and inventing a cap from history is what this design refuses."""
+    plan = make_plan(make_goal("Marathon", today + timedelta(weeks=20)))
+    assert generator.weekly_hours_plan(db, user_id, _monday(today), plan=plan) is None
+
+
+def test_hours_demand_sums_generator_sessions(db, user_id, today, plan_with_cap):
+    plan = plan_with_cap(10.0)
+    wk = _monday(today)
+    _gen_workout(db, user_id, wk.isoformat(), target_duration_sec=3600)
+    _gen_workout(db, user_id, (wk + timedelta(days=1)).isoformat(), target_duration_sec=1800)
+    h = generator.weekly_hours_plan(db, user_id, wk, plan=plan)
+    assert h["demandHours"] == pytest.approx(1.5)
+    assert h["isOverCap"] is False and h["overBy"] is None
+
+
+def test_hours_conflict_is_surfaced_with_real_numbers(db, user_id, today, plan_with_cap):
+    plan = plan_with_cap(1.0)
+    wk = _monday(today)
+    _gen_workout(db, user_id, wk.isoformat(), target_duration_sec=7200)
+    h = generator.weekly_hours_plan(db, user_id, wk, plan=plan)
+    assert h["isOverCap"] is True
+    assert h["overBy"] == pytest.approx(1.0)
+    assert h["capHours"] == 1.0
+
+
+def test_other_planners_sessions_are_excluded(db, user_id, today, plan_with_cap):
+    """The overcount trap, confirmed against real production: Garmin, Coach and HALE all
+    write a row for the same date and the athlete does ONE of them. Summing every source
+    reported ~3.9h for a single day and made the cap meaningless."""
+    from app.models import Workout
+    plan = plan_with_cap(5.0)
+    wk = _monday(today)
+    _gen_workout(db, user_id, wk.isoformat(), target_duration_sec=3600)
+    for src in ("garmin", "coach"):
+        db.add(Workout(id=f"workout_{uuid.uuid4().hex[:12]}", user_id=user_id,
+                       scheduled_date=wk.isoformat(), source=src, status="planned",
+                       workout_type="easy", activity_type="Run", target_duration_sec=4500,
+                       created_at="2026-01-01T00:00:00+00:00"))
+    db.commit()
+    assert generator.weekly_hours_plan(db, user_id, wk, plan=plan)["demandHours"] == pytest.approx(1.0)
+
+
+def test_sessions_without_a_duration_are_reported_not_silently_zero(db, user_id, today, plan_with_cap):
+    """A session with no derivable duration makes the total a floor. Counting it as zero
+    would understate demand and could hide a real conflict."""
+    plan = plan_with_cap(5.0)
+    wk = _monday(today)
+    _gen_workout(db, user_id, wk.isoformat(), target_duration_sec=3600)
+    _gen_workout(db, user_id, (wk + timedelta(days=1)).isoformat(), workout_type="strength")
+    h = generator.weekly_hours_plan(db, user_id, wk, plan=plan)
+    assert h["unknownSessions"] == 1
+    assert h["demandHours"] == pytest.approx(1.0)
+
+
+def test_rest_days_cost_nothing(db, user_id, today, plan_with_cap):
+    plan = plan_with_cap(5.0)
+    wk = _monday(today)
+    _gen_workout(db, user_id, wk.isoformat(), workout_type="rest", target_duration_sec=9999)
+    h = generator.weekly_hours_plan(db, user_id, wk, plan=plan)
+    assert h["demandHours"] == 0.0 and h["unknownSessions"] == 0

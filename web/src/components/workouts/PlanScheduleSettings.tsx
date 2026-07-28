@@ -107,6 +107,15 @@ export function PlanScheduleSettings({ plan }: { plan: TrainingPlan }) {
                 ? "Using the default (Saturday). Pick a day to pin it, or tap the selected day again to clear."
                 : "Tap the selected day again to go back to the default."}
             </p>
+            {/* Informational only. A derived multi-week average must never override an
+                explicit day choice, so this never moves the run — it just says what
+                your own data shows. Absent entirely when there aren't enough nights. */}
+            {plan.typicalWakeTime && (
+              <p className="text-hale-faint text-[11px] leading-relaxed">
+                You typically wake around {plan.typicalWakeTime}. HALE flags a long run
+                that would cut that short, but never moves it for you.
+              </p>
+            )}
           </div>
 
           <div className="flex flex-col gap-1.5">
@@ -134,6 +143,38 @@ export function PlanScheduleSettings({ plan }: { plan: TrainingPlan }) {
               Leave blank for no cap — HALE won't invent one from your history, since how
               much you <em>have</em> trained isn't how much you're <em>able</em> to.
             </p>
+
+            {plan.hours && (
+              <div className="text-xs">
+                <span className={plan.hours.isOverCap ? "text-hale-hot" : "text-muted-foreground"}>
+                  This week's HALE sessions: {plan.hours.demandHours.toFixed(1)}h of{" "}
+                  {plan.hours.capHours.toFixed(1)}h
+                  {plan.hours.isOverCap && ` · over by ${plan.hours.overBy?.toFixed(1)}h`}
+                </span>
+                {/* Never silently treated as zero — the total is a floor while any
+                    session has no derivable duration. */}
+                {plan.hours.unknownSessions > 0 && (
+                  <span className="text-hale-faint">
+                    {" "}
+                    (+{plan.hours.unknownSessions} session
+                    {plan.hours.unknownSessions === 1 ? "" : "s"} with no set duration — this
+                    total is a minimum)
+                  </span>
+                )}
+                {plan.hours.isOverCap && (
+                  // The design doc is explicit that a conflict is surfaced, never
+                  // auto-resolved by quietly shrinking the primary goal's long run.
+                  <p className="text-hale-faint mt-0.5 leading-relaxed">
+                    HALE won't shrink your key sessions to fit. Raise the cap, drop a
+                    supporting goal, or move a race date.
+                  </p>
+                )}
+                <p className="text-hale-faint mt-0.5 leading-relaxed">
+                  Counts HALE's own prescribed sessions only — not your Garmin plan's,
+                  since those overlap on the same days.
+                </p>
+              </div>
+            )}
           </div>
         </div>
       )}
