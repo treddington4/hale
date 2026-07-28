@@ -144,6 +144,23 @@ function GoalGroup({ plan, goalRef, defaultExpanded }: { plan: TrainingPlan; goa
 
               <PlanWeekDays week={current} workouts={weekWorkouts} todayIso={today} />
 
+              {/* Garmin revises the same day's suggestion repeatedly, so a stale copy is
+                  actively misleading rather than merely old — it shows a duration the
+                  Garmin app no longer agrees with. Real case: HALE displayed 76min while
+                  the app said 55min, with nothing on screen to hint the number was
+                  a day out of date. */}
+              {plan.garminPlan.isStale && (
+                <div className="text-hale-hot text-[11px] leading-relaxed">
+                  Garmin sessions below may be out of date — last read{" "}
+                  {plan.garminPlan.ageHours != null
+                    ? `${Math.round(plan.garminPlan.ageHours)}h ago`
+                    : "never"}
+                  {plan.garminPlan.inCooldown
+                    ? `. Garmin is rate-limiting HALE (${plan.garminPlan.consecutiveFailures} failed attempts), so it can't refresh yet — check the Garmin app for today's actual session.`
+                    : ". Check the Garmin app for today's actual session."}
+                </div>
+              )}
+
               {/* Two planners run at once and they are not the same plan — say so once,
                   here, rather than leaving the per-day source tags to imply it. */}
               <div className="text-hale-faint text-[11px] leading-relaxed">

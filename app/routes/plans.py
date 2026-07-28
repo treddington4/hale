@@ -13,7 +13,9 @@ from datetime import datetime, timezone
 
 from fastapi import APIRouter, HTTPException, Request, Depends
 
-from ..models import SessionLocal, Goal, TrainingPlan, PlanGoal, DEFAULT_USER_ID
+from ..models import (
+    SessionLocal, Goal, TrainingPlan, PlanGoal, DEFAULT_USER_ID, get_sync_meta, user_key,
+)
 from ..accounts import auth
 from .. import stats
 from ..coach import generator
@@ -72,7 +74,63 @@ def _plan_to_dict(db, p: TrainingPlan, user_id: str) -> dict:
         # Per-weekday free hours (real: awake window minus declared work) and a
         # suggested trainable ceiling (a heuristic — see stats.TRAINING_SHARE_OF_FREE_TIME).
         "timeBudget": stats.daily_time_budget(db, user_id, p),
+        # Garmin sessions are rendered with real durations; if HALE's copy of the
+        # adaptive plan is stale it is quoting a number Garmin has since revised.
+        "garminPlan": _garmin_plan_freshness(user_id),
         "goals": goals,
+    }
+
+
+# A Garmin adaptive-plan suggestion older than this is called out as possibly stale.
+# Garmin revises the same day's suggestion repeatedly — production's 2026-07-28 row was
+# revised on the 24th, 26th and 27th — so a copy more than a day old is genuinely likely
+# to disagree with what the Garmin app is showing right now. Confirmed the hard way:
+# HALE displayed a 76min session while the app said 55min, with nothing on screen to
+# suggest the number might not be current.
+GARMIN_PLAN_STALE_AFTER_HOURS = 24
+
+
+def _garmin_plan_freshness(user_id: str) -> dict:
+    """When HALE last managed to read Garmin's adaptive plan, and why it might be
+    behind. Garmin sessions are shown with real durations, so if the fetch is stale the
+    UI is quoting a number Garmin has since changed — that has to be visible rather than
+    presented as current."""
+    from ..sync.garmin_sync import (
+        GARMIN_ADAPTIVE_PLAN_LAST_CHECKED_KEY, GARMIN_RATE_LIMIT_COOLDOWN_UNTIL_KEY,
+        GARMIN_RATE_LIMIT_FAILURES_KEY,
+    )
+    checked = get_sync_meta(user_key(user_id, GARMIN_ADAPTIVE_PLAN_LAST_CHECKED_KEY))
+    cooldown = get_sync_meta(user_key(user_id, GARMIN_RATE_LIMIT_COOLDOWN_UNTIL_KEY))
+    failures = get_sync_meta(user_key(user_id, GARMIN_RATE_LIMIT_FAILURES_KEY))
+
+    age_hours = None
+    if checked:
+        try:
+            then = datetime.fromisoformat(checked)
+            if then.tzinfo is None:
+                then = then.replace(tzinfo=timezone.utc)
+            age_hours = (datetime.now(timezone.utc) - then).total_seconds() / 3600.0
+        except (TypeError, ValueError):
+            age_hours = None
+
+    in_cooldown = False
+    if cooldown:
+        try:
+            until = datetime.fromisoformat(cooldown)
+            if until.tzinfo is None:
+                until = until.replace(tzinfo=timezone.utc)
+            in_cooldown = until > datetime.now(timezone.utc)
+        except (TypeError, ValueError):
+            in_cooldown = False
+
+    return {
+        "lastCheckedAt": checked,
+        "ageHours": round(age_hours, 1) if age_hours is not None else None,
+        # Never checked at all counts as stale — "no data" must not read as "fresh".
+        "isStale": age_hours is None or age_hours > GARMIN_PLAN_STALE_AFTER_HOURS,
+        "inCooldown": in_cooldown,
+        "cooldownUntil": cooldown if in_cooldown else None,
+        "consecutiveFailures": int(failures) if failures and str(failures).isdigit() else 0,
     }
 
 

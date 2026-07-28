@@ -273,7 +273,19 @@ export interface TrainingPlan {
   hours: PlanHours | null
   typicalWakeTime: string | null // "HH:MM" local; null until enough real nights exist
   timeBudget: DayTimeBudget[]
+  garminPlan: GarminPlanFreshness
   goals: PlanGoalRef[]
+}
+
+// Garmin revises the same day's suggestion repeatedly, so a stale copy genuinely
+// disagrees with the Garmin app. Shown rather than presented as current.
+export interface GarminPlanFreshness {
+  lastCheckedAt: string | null
+  ageHours: number | null
+  isStale: boolean
+  inCooldown: boolean
+  cooldownUntil: string | null
+  consecutiveFailures: number
 }
 
 export interface PlanWeek {
