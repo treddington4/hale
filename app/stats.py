@@ -182,7 +182,10 @@ def run_detail(db, run_id: str, user_id: str = DEFAULT_USER_ID) -> dict | None:
         return None
     hr_floor = get_hr_floor(db, user_id)
     linked_workout = _linked_workout_for_run(db, run_id, user_id)
-    body_battery_impact = extract_body_battery_impact(r)
+    daily_steps = db.query(DailySteps).filter(
+        DailySteps.date == r.date, owned_by(DailySteps.user_id, user_id)
+    ).first()
+    body_battery_impact = extract_body_battery_impact(daily_steps)
     return {
         "id": r.id, "date": r.date, "name": r.name, "activityType": r.activity_type,
         "distanceMi": r.distance_mi, "movingTimeSec": r.moving_time_sec,
@@ -1045,18 +1048,21 @@ def fetch_article_text(url: str, max_chars: int = 5000) -> str | None:
         return None
 
 
-def extract_body_battery_impact(activity_row) -> dict | None:
+def extract_body_battery_impact(daily_steps_row) -> dict | None:
     """P19: Extract net body battery impact from an activity's intraday series.
+
+    Body battery is stored on DailySteps (one row per date), not on the activity
+    itself, so callers must look up the DailySteps row for the activity's date first.
 
     Returns: {"startValue": 75, "endValue": 42, "delta": -33, "recovered": False}
     or None if insufficient data (no series, or values at start/end can't be determined).
     """
-    if not activity_row or not getattr(activity_row, 'body_battery_json', None):
+    if not daily_steps_row or not daily_steps_row.body_battery_json:
         return None
 
     try:
         import json
-        series = json.loads(activity_row.body_battery_json or "[]")
+        series = json.loads(daily_steps_row.body_battery_json or "[]")
         if not series or len(series) < 2:
             return None
 
