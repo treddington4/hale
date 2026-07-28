@@ -20,3 +20,17 @@ export function useAddPlanGoal() {
     onSuccess: () => qc.invalidateQueries({ queryKey: ["plans"] }),
   })
 }
+
+export function useUpdatePlan() {
+  const qc = useQueryClient()
+  return useMutation({
+    mutationFn: ({ planId, ...body }: Parameters<typeof api.updatePlan>[1] & { planId: string }) =>
+      api.updatePlan(planId, body),
+    onSuccess: () => {
+      qc.invalidateQueries({ queryKey: ["plans"] })
+      // Availability and long-run day change what each week's sessions look like, so the
+      // cached week series is stale the moment either is saved.
+      qc.invalidateQueries({ queryKey: ["planWeeks"] })
+    },
+  })
+}

@@ -204,6 +204,15 @@ def nearest_active_race_goal(db, user_id, date) -> Goal | None:
     )
 
 
+def _active_training_plan(db, user_id) -> TrainingPlan | None:
+    """The user's single active plan, or None. P21 allows exactly one (see TrainingPlan's
+    docstring); .first() rather than .one() so a hand-edited DB with two can't crash the
+    nightly generator over a data problem it isn't responsible for fixing."""
+    return (db.query(TrainingPlan)
+            .filter(TrainingPlan.user_id == user_id, TrainingPlan.status == "active")
+            .first())
+
+
 def resolve_periodization_goal(db, user_id, date) -> Goal | None:
     """P21 — which goal actually drives the generator's real prescriptions. An active
     TrainingPlan's "primary" PlanGoal wins once one exists: starting a plan and naming a
@@ -214,9 +223,7 @@ def resolve_periodization_goal(db, user_id, date) -> Goal | None:
     started plan has no primary goal, or that goal is no longer a live active race — so a
     user who never touches the Workouts-tab plan builder sees zero behavior change, and a
     stale/completed primary goal can never orphan periodization instead of degrading."""
-    plan = (db.query(TrainingPlan)
-            .filter(TrainingPlan.user_id == user_id, TrainingPlan.status == "active")
-            .first())
+    plan = _active_training_plan(db, user_id)
     if plan:
         primary = (db.query(PlanGoal)
                    .filter(PlanGoal.training_plan_id == plan.id, PlanGoal.role == "primary")
@@ -440,17 +447,76 @@ def _weeks_active_in_activity(db, user_id, before_week_start, activity_type, max
 DAY_SHARE = {"long": 0.30, "tempo": 0.18, "interval": 0.15, "easy": 0.10, "cross_train": 0.10, "rest": 0}
 
 
-def _skeleton_workout_type(weekday: int, phase: str) -> str:
+def resolve_weekday_skeleton(plan=None) -> dict:
+    """P21 — WEEKDAY_SKELETON adjusted for one plan's declared availability and long-run
+    day. `plan=None` (or a plan with neither field set) returns the module default
+    unchanged, so every pre-P21 caller and any user who never opens the plan builder gets
+    byte-identical behavior.
+
+    Two adjustments, applied in this order for a reason:
+
+    1. `long_run_day` swaps the long session onto the requested weekday, trading places
+       with whatever sat there — a swap rather than an overwrite, so the displaced session
+       isn't silently lost.
+    2. `available_days_json` turns every unavailable day into a rest day.
+
+    Availability is applied second and therefore wins, because "I cannot train Tuesday" is
+    a fact about the athlete's week while "I prefer my long run on Tuesday" is a
+    preference. But a long run must never be silently deleted by that rule — it's the
+    single most important session in an endurance week — so if the requested (or default)
+    long day turns out to be unavailable, the long run relocates to the latest available
+    day instead of vanishing. If NO day is available the week is honestly all rest; that's
+    a real answer to a real input, not a failure to handle it."""
+    skeleton = dict(WEEKDAY_SKELETON)
+    if plan is None:
+        return skeleton
+
+    long_day = getattr(plan, "long_run_day", None)
+    if long_day is not None and 0 <= long_day <= 6 and skeleton.get(long_day) != "long":
+        current_long = next((d for d, t in skeleton.items() if t == "long"), None)
+        if current_long is not None:
+            skeleton[current_long], skeleton[long_day] = skeleton[long_day], "long"
+        else:
+            skeleton[long_day] = "long"
+
+    available = _parse_available_days(getattr(plan, "available_days_json", None))
+    if available is not None:
+        long_day_now = next((d for d, t in skeleton.items() if t == "long"), None)
+        for d in range(7):
+            if d not in available:
+                skeleton[d] = "rest"
+        if long_day_now is not None and long_day_now not in available and available:
+            skeleton[max(available)] = "long"
+    return skeleton
+
+
+def _parse_available_days(raw) -> set | None:
+    """None means "no availability declared" — every day usable, today's behavior. An
+    explicitly empty list is NOT the same thing and is preserved as an empty set (a week
+    with no training days), rather than being quietly treated as "all days"."""
+    if not raw:
+        return None
+    try:
+        days = json.loads(raw)
+    except (TypeError, ValueError):
+        return None
+    if not isinstance(days, list):
+        return None
+    return {d for d in days if isinstance(d, int) and 0 <= d <= 6}
+
+
+def _skeleton_workout_type(weekday: int, phase: str, skeleton: dict | None = None) -> str:
     """The base session type for a weekday, before any readiness gating. Shared by the
     generator and by _normalized_day_share so the two can't disagree about what a week
-    is supposed to contain."""
-    skeleton_type = WEEKDAY_SKELETON[weekday]
+    is supposed to contain — which is also why `skeleton` has to be threaded through both
+    rather than resolved independently inside each."""
+    skeleton_type = (skeleton or WEEKDAY_SKELETON)[weekday]
     if skeleton_type == "quality":
         return "interval" if phase == "peak" else "tempo"
     return skeleton_type  # "easy" | "long" | "rest" | "cross_train"
 
 
-def _normalized_day_share(workout_type: str, phase: str) -> float:
+def _normalized_day_share(workout_type: str, phase: str, skeleton: dict | None = None) -> float:
     """This day's fraction of the weekly budget, scaled so a full compliant week actually
     sums to that budget.
 
@@ -464,9 +530,9 @@ def _normalized_day_share(workout_type: str, phase: str) -> float:
     Downgrades (a readiness-gated tempo becoming easy) still legitimately land under
     budget — that's a real reduction, not an accounting error."""
     total = sum(
-        DAY_SHARE.get(_skeleton_workout_type(d, phase), 0.10)
+        DAY_SHARE.get(_skeleton_workout_type(d, phase, skeleton), 0.10)
         for d in range(7)
-        if _skeleton_workout_type(d, phase) not in ("rest", "cross_train")
+        if _skeleton_workout_type(d, phase, skeleton) not in ("rest", "cross_train")
     )
     if total <= 0:
         return 0.0
@@ -725,6 +791,13 @@ def _generate_endurance(db, user_id, date, readiness_result, config, activity_ty
     date_str = date.isoformat()
     week_start = _week_start(date)
     phase = _phase_for_date(db, user_id, date, goal=resolve_periodization_goal(db, user_id, date))
+    # P21 — the athlete's declared available days / long-run day, when a plan exists.
+    # `training_plan` (not `plan`, which below is the per-week WeeklyPlan row) is the
+    # TrainingPlan. Resolved once and threaded into BOTH the day-type lookup and the
+    # day-share normalization: those two must agree about what the week contains, or
+    # the weekly target stops being reachable (see _normalized_day_share's docstring).
+    training_plan = _active_training_plan(db, user_id)
+    skeleton = resolve_weekday_skeleton(training_plan)
     flags = readiness_result["flags"]
     severe_health = _has_severe_health_note(db, user_id)
 
@@ -746,7 +819,7 @@ def _generate_endurance(db, user_id, date, readiness_result, config, activity_ty
         )
         plan = None
 
-    base_type = "easy" if ignore_schedule else _skeleton_workout_type(date.weekday(), phase)
+    base_type = "easy" if ignore_schedule else _skeleton_workout_type(date.weekday(), phase, skeleton)
 
     trigger_notes = []
     workout_type = base_type
@@ -790,7 +863,7 @@ def _generate_endurance(db, user_id, date, readiness_result, config, activity_ty
             if sessions and sessions <= 1:
                 target_distance_mi = round(budget, 1)
             else:
-                target_distance_mi = round(budget * _normalized_day_share(workout_type, phase), 1)
+                target_distance_mi = round(budget * _normalized_day_share(workout_type, phase, skeleton), 1)
         if target_distance_mi is not None:
             floor = MIN_SESSION_MILES.get(activity_type)
             if floor and target_distance_mi < floor:

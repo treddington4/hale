@@ -708,6 +708,18 @@ export const api = {
   // to add a supporting goal or to reassign which goal is primary.
   addPlanGoal: (goalId: string, role?: "primary" | "supporting") =>
     request<TrainingPlan>("/api/plans", { method: "POST", body: JSON.stringify({ goalId, role }) }),
+  // Only the keys present in `body` are applied — omitting one leaves it untouched,
+  // while sending it explicitly as null clears it. null is meaningful for all four
+  // (it means "not declared"), so the two cases can't be collapsed.
+  updatePlan: (
+    planId: string,
+    body: Partial<{
+      weeklyHoursCap: number | null
+      availableDays: number[] | null
+      longRunDay: number | null
+      sleepConstraintMode: "soft" | "off"
+    }>,
+  ) => request<TrainingPlan>(`/api/plans/${planId}`, { method: "PATCH", body: JSON.stringify(body) }),
   planWeeks: (planId: string, goalId: string, opts?: { weeksBack?: number; weeksForward?: number }) => {
     const params = new URLSearchParams({ goalId })
     if (opts?.weeksBack != null) params.set("weeksBack", String(opts.weeksBack))

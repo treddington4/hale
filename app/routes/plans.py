@@ -160,6 +160,66 @@ async def add_plan_goal(request: Request, user_id: str = Depends(auth.current_us
         db.close()
 
 
+@router.patch("/api/plans/{plan_id}")
+async def update_plan(plan_id: str, request: Request, user_id: str = Depends(auth.current_user_id)):
+    """Plan-level scheduling config: weekly hours cap, available days, long-run day,
+    sleep-constraint mode. Every field is optional and only applied when the key is
+    actually present in the body — sending `{"weeklyHoursCap": null}` clears the cap,
+    while omitting the key entirely leaves it untouched. That distinction matters here
+    because null is a meaningful value for all four (it means "not declared", which is
+    the honest default, not a fabricated number)."""
+    body = await request.json()
+    db = SessionLocal()
+    try:
+        p = db.get(TrainingPlan, plan_id)
+        if not p or p.user_id != user_id:
+            raise HTTPException(404, "Plan not found")
+
+        if "weeklyHoursCap" in body:
+            cap = body["weeklyHoursCap"]
+            if cap is not None:
+                try:
+                    cap = float(cap)
+                except (TypeError, ValueError):
+                    raise HTTPException(400, "weeklyHoursCap must be a number or null")
+                if not 0 < cap <= 168:
+                    raise HTTPException(400, "weeklyHoursCap must be between 0 and 168 hours")
+            p.weekly_hours_cap = cap
+
+        if "availableDays" in body:
+            days = body["availableDays"]
+            if days is None:
+                p.available_days_json = None
+            else:
+                if not isinstance(days, list) or any(
+                        not isinstance(d, int) or isinstance(d, bool) or not 0 <= d <= 6 for d in days):
+                    raise HTTPException(400, "availableDays must be a list of weekday ints 0-6 (0=Mon), or null")
+                # Stored sorted+deduped so the value read back is stable regardless of
+                # what order the client sent, and so generator._parse_available_days
+                # never has to care.
+                p.available_days_json = json.dumps(sorted(set(days)))
+
+        if "longRunDay" in body:
+            d = body["longRunDay"]
+            if d is not None:
+                if not isinstance(d, int) or isinstance(d, bool) or not 0 <= d <= 6:
+                    raise HTTPException(400, "longRunDay must be a weekday int 0-6 (0=Mon), or null")
+            p.long_run_day = d
+
+        if "sleepConstraintMode" in body:
+            mode = body["sleepConstraintMode"]
+            # No "hard" mode by design — see docs/P20_P21_DESIGN.md §2.4: a derived
+            # wake-time pattern must never silently override an explicit day choice.
+            if mode not in ("soft", "off"):
+                raise HTTPException(400, 'sleepConstraintMode must be "soft" or "off"')
+            p.sleep_constraint_mode = mode
+
+        db.commit()
+        return _plan_to_dict(db, p, user_id)
+    finally:
+        db.close()
+
+
 @router.get("/api/plans/{plan_id}/weeks")
 def get_plan_weeks(plan_id: str, goalId: str, weeksBack: int = 8, weeksForward: int = 12,
                    user_id: str = Depends(auth.current_user_id)):

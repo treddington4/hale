@@ -356,3 +356,86 @@ def test_strength_workout_gets_a_duration_estimate(db, user_id, today, training_
     assert w is not None
     assert generator.workout_duration_hours(db.get(Workout, w["id"])) == pytest.approx(
         generator.STRENGTH_SESSION_DURATION_MIN / 60)
+
+
+# ---------- P21 plan-aware weekday skeleton ----------
+
+
+def _sk(long_run_day=None, available_days=None):
+    """A stand-in for a TrainingPlan carrying just the two fields the resolver reads."""
+    import json as _json
+    class _P:
+        pass
+    p = _P()
+    p.long_run_day = long_run_day
+    p.available_days_json = _json.dumps(available_days) if available_days is not None else None
+    return generator.resolve_weekday_skeleton(p)
+
+
+def test_no_plan_leaves_the_skeleton_untouched():
+    """The compatibility guarantee: a user who never opens the plan builder must get
+    byte-identical scheduling to before P21."""
+    assert generator.resolve_weekday_skeleton(None) == generator.WEEKDAY_SKELETON
+    assert _sk() == generator.WEEKDAY_SKELETON
+
+
+def test_long_run_day_moves_the_long_session():
+    sk = _sk(long_run_day=6)  # Sunday
+    assert sk[6] == "long"
+    assert list(sk.values()).count("long") == 1, "exactly one long run per week"
+
+
+def test_long_run_day_swaps_rather_than_overwrites():
+    """The displaced session must survive the move — a swap, not an overwrite, so a week
+    doesn't quietly lose a session every time the long run is repositioned."""
+    default_long_day = next(d for d, t in generator.WEEKDAY_SKELETON.items() if t == "long")
+    displaced = generator.WEEKDAY_SKELETON[6]
+    sk = _sk(long_run_day=6)
+    assert sk[6] == "long"
+    assert sk[default_long_day] == displaced
+
+
+def test_unavailable_days_become_rest():
+    sk = _sk(available_days=[0, 2, 4])
+    for d in (1, 3, 5, 6):
+        assert sk[d] == "rest", f"weekday {d} was not marked unavailable"
+    for d in (0, 2, 4):
+        assert sk[d] != "rest" or generator.WEEKDAY_SKELETON[d] == "rest"
+
+
+def test_long_run_relocates_rather_than_vanishing_when_its_day_is_unavailable():
+    """Availability wins over preference — but a long run is the most important session
+    in an endurance week and must never be silently deleted by that rule."""
+    sk = _sk(long_run_day=6, available_days=[0, 2, 4])  # Sunday requested but unavailable
+    assert "long" in sk.values(), "the long run was silently dropped"
+    assert sk[4] == "long", "expected relocation to the latest available day"
+
+
+def test_no_available_days_is_an_honest_all_rest_week():
+    """An explicitly empty availability list is a real answer, not a parse failure to
+    fall back on — it must not silently become 'every day available'."""
+    sk = _sk(available_days=[])
+    assert set(sk.values()) == {"rest"}
+
+
+def test_malformed_available_days_falls_back_to_every_day():
+    for bad in ("not json", '{"mon": true}', "[]", '["mon","tue"]'):
+        p = type("P", (), {"long_run_day": None, "available_days_json": bad})()
+        sk = generator.resolve_weekday_skeleton(p)
+        # "[]" is genuinely empty (all rest); the rest are unparseable -> default week.
+        assert sk == generator.WEEKDAY_SKELETON or set(sk.values()) == {"rest"}
+
+
+def test_day_share_still_sums_to_the_full_budget_under_a_custom_skeleton():
+    """The invariant that makes a weekly target reachable: the training days' shares must
+    total 1.0. If the skeleton changes but _normalized_day_share doesn't see the same
+    one, the target silently becomes unreachable — the exact bug that normalization was
+    added to fix."""
+    for phase in ("base", "build", "peak", "taper"):
+        for sk in (_sk(long_run_day=6), _sk(available_days=[0, 2, 4, 6]), _sk(long_run_day=1, available_days=[1, 3, 5])):
+            total = sum(
+                generator._normalized_day_share(generator._skeleton_workout_type(d, phase, sk), phase, sk)
+                for d in range(7)
+                if generator._skeleton_workout_type(d, phase, sk) not in ("rest", "cross_train")
+            )
+            assert total == pytest.approx(1.0), f"{phase} skeleton {sk} summed to {total}"

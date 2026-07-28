@@ -7,6 +7,7 @@ import { todayLocalDateString } from "@/lib/format"
 import { PlanWeekDays } from "@/components/workouts/PlanWeekDays"
 import { WeeklyPlanCard } from "@/components/workouts/WeeklyPlanCard"
 import { StartPlanDialog } from "@/components/workouts/StartPlanDialog"
+import { PlanScheduleSettings } from "@/components/workouts/PlanScheduleSettings"
 import { Button } from "@/components/ui/button"
 import { EmptyState } from "@/components/ui/empty-state"
 import { Target } from "lucide-react"
@@ -215,6 +216,8 @@ export function TrainingPlanSection() {
       {plan?.goals.map((goalRef) => (
         <GoalGroup key={goalRef.goalId} plan={plan} goalRef={goalRef} defaultExpanded={plan.goals.length === 1} />
       ))}
+
+      {plan && <PlanScheduleSettings plan={plan} />}
 
       <StartPlanDialog
         open={dialogOpen}
