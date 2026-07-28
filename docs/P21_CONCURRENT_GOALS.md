@@ -221,15 +221,94 @@ at all once the simpler fix has been lived with.
 - `POST /api/plans` — takes a goal *and a role*, attaching to the single active block
   rather than minting a competing plan.
 
-## 6. Open questions for the user
+## 6. Open questions for the user — resolved 2026-07-27
 
-1. **Is the 50mi ride hypothetical or real?** It changes whether this is built now or
-   designed now. The wedding/honeymoon/marathon calendar is already known
-   (2026-09-12 / ~2 weeks / 2026-11-08); a cycling goal in that window would interact
-   with the honeymoon interruption directly.
-2. **What is the real weekly hours ceiling?** Observed 1.7–7.7, but observed is not the
-   same as available. The cap should be what's actually sustainable, not the max ever
-   hit.
-3. **Does strength count against the same budget?** It consumes hours and recovery and
-   already has TSS (3/3 coverage), but it's currently generated on its own track
-   (`_generate_strength`) independent of the endurance budget entirely.
+1. **Is the 50mi ride hypothetical or real?** **Hypothetical.** Build the primary+
+   supporting model generically — no real second `Goal` row to attach today. The only
+   live cycling feature stays the P21-lite weekly ride
+   (`UserTrainingConfig.ride_days_per_week`, already on by default), which is
+   deliberately untouched by this redesign (see its own docstring). `PlanGoal` ships
+   with its `role="supporting"` path exercised only by tests until a real second goal
+   exists.
+2. **What is the real weekly hours ceiling?** **Not a number to fabricate — a Settings
+   field, nullable, unset by default.** The user's actual answer wasn't a number; it was
+   a correction to the question's premise: hours-needed legitimately *grows* through a
+   training block (a 26mi long run alone is 4+ hours at training pace), so a single
+   flat ceiling misreads normal periodization as a conflict. Resolved as two separate
+   things that were being conflated:
+   - `weekly_hours_cap` (lives on `TrainingPlan`, per §3) is real-life *availability* —
+     work/life bandwidth, roughly stable across a block. This is genuinely the user's
+     call, not derivable from training history, so it stays `NULL` (no cap enforced,
+     §3.3's conflict check simply skipped) until set explicitly, matching this
+     codebase's "never fabricate a number" discipline (dashboard cards, `goal_progress`).
+   - The *essential-hours* side of the §3.3 comparison — what a given week's
+     non-negotiable sessions actually cost — must be computed from each `Workout`'s own
+     `target_duration_sec`, or `target_distance_mi × target_pace_sec_per_mi` when only
+     those are set, **never** a flat distance × constant-pace shortcut. Long-run pace is
+     genuinely slower than an average training pace, and the distance itself grows
+     toward peak — using the workout's own prescribed pace/distance is what makes the
+     hours estimate track that growth honestly instead of underestimating a peak-block
+     long run. New `generator.workout_duration_hours(workout) -> float | None` (returns
+     `None`, not 0, when neither field is set — e.g. strength before §6.3's estimate is
+     wired in) is the one place this conversion happens, so §3.3's conflict check and
+     any future display both read the same number.
+3. **Does strength count against the same budget?** **Yes — fold it in.** Two
+   consequences, since `_generate_strength` prescribes *before* a session happens and
+   TSS/duration today are only ever known *after* (computed at sync time from the
+   completed activity, same as every other activity type):
+   - Pre-hoc budget math (conflict surfacing, remaining-fungible-volume allocation, §3.1
+     step 3) needs an a priori estimate. Add a small per-template constant next to
+     `STRENGTH_TEMPLATES` (e.g. `STRENGTH_TEMPLATE_DURATION_MIN = {"full_body_ab": 50,
+     ...}`, defaulting ~45–50min where a template has no override) and set
+     `Workout.target_duration_sec` from it in `_generate_strength` — currently unset
+     entirely (verified: no `target_duration_sec=` in that call), so this is a real gap,
+     not a lookup of something already there. Also makes `workout_duration_hours` (Q2)
+     return a real value for strength instead of `None`.
+   - Post-hoc, real completed-strength TSS (P5, 3/3 coverage) is what should actually
+     count against the block's rolling load once P21 tracks real vs. planned — the
+     pre-hoc estimate is only ever a planning input, never allowed to overwrite a real
+     logged number.
+   - `_generate_strength` stays its own function/track (readiness gating, progression
+     state, A/B template rotation are all strength-specific and shouldn't be
+     re-homed) — "folded into the shared budget" means its *hours cost is counted*
+     against `weekly_hours_cap` alongside endurance, not that strength moves into
+     `_generate_endurance` or gets rewritten.
+
+## 7. Design pass closed — scope for P21.2 (implementation, separate session)
+
+Everything above is now a decided data shape, not an open question. Carried forward
+unchanged from `P20_P21_DESIGN.md`: §2.2 (planned-interruption windows, narrowed by §4
+above), §2.4 (sleep-schedule awareness — soft warning only), §2.5
+(`Goal.periodizes_training`, already shipped).
+
+**Schema (`app/models.py`):**
+- Rebuild `TrainingPlan` per §3 (drop `goal_id`/`uq_training_plan_user_goal`, add
+  `weekly_hours_cap` (nullable, Settings-set, never defaulted — §6.2),
+  `available_days_json`, `long_session_day`). One active row per user, not per goal.
+  Drop-and-recreate migration (§3's migration note) — production holds exactly one row.
+- New `PlanGoal` table per §3 (`training_plan_id`, `goal_id`, `role`).
+- `Workout.serves_goal_ids_json` (additive, nullable) per §3.2.
+- `_MIGRATABLE_TABLES` entries for both changed tables.
+
+**Generator (`app/coach/generator.py`):**
+- `resolve_periodization_goal` — primary `PlanGoal` replaces
+  `nearest_active_race_goal` as what `_phase_for_date` resolves against, once a plan
+  exists (falls back to today's nearest-race behavior with no active plan).
+- `workout_duration_hours(workout) -> float | None` (§6.2) — single conversion point,
+  used by both the conflict check below and any future display.
+- Budget allocation per §3.1's three steps; §3.3's conflict surfacing skipped
+  entirely when `weekly_hours_cap` is `NULL`.
+- `_generate_strength` gains `target_duration_sec` from the new
+  `STRENGTH_TEMPLATE_DURATION_MIN` constant (§6.3).
+- `_last_nonzero_week_mileage` interruption-skip, per §4 (only disciplines reduced-
+  but-not-stopped need it — a hard stop already degrades to 0 and is handled).
+
+**Frontend:** plan-builder UI for `weekly_hours_cap`/`available_days_json`/
+`long_session_day` (a Settings-adjacent form, not invented here); `TrainingPlanSection.tsx`
+stops rendering N parallel plan groups in favor of one block with a per-goal
+contribution breakdown (§5).
+
+**Tests:** extend `tests/test_ramp_base.py`'s pattern for `workout_duration_hours`
+(explicit duration vs. distance×pace vs. neither → `None`) and the conflict-surfacing
+threshold; a `PlanGoal` role-resolution test now that `role="supporting"` has no real
+goal exercising it yet (§6.1).
