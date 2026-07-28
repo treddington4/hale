@@ -646,6 +646,20 @@ class TrainingPlan(Base):
     long_run_day = Column(Integer, nullable=True)  # 0=Mon..6=Sun; NULL = today's hardcoded WEEKDAY_SKELETON[5]
     sleep_constraint_mode = Column(String, default="soft")  # "soft" | "off" — see stats.typical_wake_time; no "hard"
 
+    # P21 — work hours, the one input in the time-availability model that CANNOT be
+    # derived from anything this app syncs (sleep comes from Garmin; work does not).
+    # {"0": {"start":"07:00","end":"17:00","breakHours":1}} keyed by weekday, 0=Mon;
+    # a missing weekday means no work. Lives here rather than on User because it's read
+    # alongside available_days_json/long_run_day as one availability picture, and
+    # TrainingPlan is already one-per-user — but note it would need carrying forward if
+    # a plan is ever archived and replaced. See stats.daily_time_budget.
+    work_schedule_json = Column(Text, nullable=True)
+    # Optional per-weekday override of the *suggested* trainable ceiling, {"5": 3.5}.
+    # The suggestion is a heuristic (stats.TRAINING_SHARE_OF_FREE_TIME); how much of
+    # your own free time is really trainable is a work/life judgement that belongs to
+    # the athlete, so it has to be overridable.
+    daily_training_cap_json = Column(Text, nullable=True)
+
 
 class PlanGoal(Base):
     """P21 — which goals a TrainingPlan serves, and in what role. Exactly one "primary"

@@ -743,7 +743,7 @@ def project_week_series(db, user_id, plan, goal, weeks_back=8, weeks_forward=12)
     return weeks
 
 
-def workout_duration_hours(workout) -> float | None:
+def workout_duration_hours(workout, fallback_pace_sec_per_mi: float | None = None) -> float | None:
     """P21 — the one place a Workout's time cost is derived, for §3.3's essential-hours-
     vs-weekly_hours_cap conflict check (docs/P21_CONCURRENT_GOALS.md §6 Q2/Q3). Prefers
     the workout's own target_duration_sec; falls back to target_distance_mi ×
@@ -751,12 +751,20 @@ def workout_duration_hours(workout) -> float | None:
     constant-pace shortcut — a workout's own prescribed pace is genuinely slower for a
     long run than an easy run, and the distance itself grows toward peak, so reading the
     real per-workout fields is what makes the hours estimate track that growth honestly
-    instead of underestimating a peak-block long run. Returns None (never 0) when neither
-    field is set, e.g. a strength session before target_duration_sec is populated."""
+    instead of underestimating a peak-block long run.
+
+    `fallback_pace_sec_per_mi` (stats.recent_typical_pace_sec_per_mi) covers HALE's own
+    generator output, which prescribes distance with no pace and was therefore reporting
+    every session as unknown-duration. A workout's own pace still wins when it has one —
+    the fallback is a population median and shouldn't override a specific prescription.
+
+    Returns None (never 0) when duration genuinely can't be derived, e.g. a strength
+    session with no target_duration_sec and nothing to estimate from."""
     if workout.target_duration_sec:
         return workout.target_duration_sec / 3600.0
-    if workout.target_distance_mi and workout.target_pace_sec_per_mi:
-        return (workout.target_distance_mi * workout.target_pace_sec_per_mi) / 3600.0
+    pace = workout.target_pace_sec_per_mi or fallback_pace_sec_per_mi
+    if workout.target_distance_mi and pace:
+        return (workout.target_distance_mi * pace) / 3600.0
     return None
 
 
@@ -781,40 +789,64 @@ def weekly_hours_plan(db, user_id, week_start, plan=None) -> dict | None:
     the demand. Real case at time of writing — strength rows generated before
     target_duration_sec was populated."""
     plan = plan if plan is not None else _active_training_plan(db, user_id)
-    if plan is None or plan.weekly_hours_cap is None:
-        return None
-
     week_end = week_start + timedelta(days=6)
     rows = (
         db.query(Workout)
         .filter(Workout.scheduled_date >= week_start.isoformat(),
                 Workout.scheduled_date <= week_end.isoformat(),
-                Workout.source == GENERATOR_SOURCE,
                 Workout.workout_type != "rest",
                 owned_by(Workout.user_id, user_id))
         .all()
     )
-    hours, unknown = 0.0, 0
-    for w in rows:
-        h = workout_duration_hours(w)
-        if h is None:
-            unknown += 1
-        else:
-            hours += h
+    fallback_pace = stats.recent_typical_pace_sec_per_mi(db, user_id)
 
-    cap = float(plan.weekly_hours_cap)
-    demand = round(hours, 2)
-    return {
+    # Per planner, NOT summed. Up to three planners write rows for the same date and the
+    # athlete does one of them (production's 2026-07-28 held a Garmin 76min easy, a Coach
+    # 78min interval and a HALE 3.7mi easy at once), so a combined total would report
+    # ~3.9h for a single day. Reporting them side by side is the honest shape: two plans
+    # genuinely disagree, and by how much is the useful signal.
+    by_source: dict[str, dict] = {}
+    longest_session = 0.0
+    for w in rows:
+        src = w.source or "coach"  # legacy-NULL rows predate the column
+        bucket = by_source.setdefault(src, {"hours": 0.0, "unknownSessions": 0})
+        h = workout_duration_hours(w, fallback_pace_sec_per_mi=fallback_pace)
+        if h is None:
+            bucket["unknownSessions"] += 1
+        else:
+            bucket["hours"] += h
+            longest_session = max(longest_session, h)
+    for v in by_source.values():
+        v["hours"] = round(v["hours"], 2)
+
+    result = {
+        "bySource": by_source,
+        "longestSessionHours": round(longest_session, 2) or None,
+        "capHours": None, "demandHours": None, "overBy": None, "isOverCap": False,
+        "unknownSessions": 0,
+    }
+    if plan is None or plan.weekly_hours_cap is None:
+        # No cap set is not "a cap of zero" — there is nothing to be over, and inventing
+        # one from history is what this design refuses. The per-source breakdown above is
+        # still real and useful, so it's returned either way.
+        return result
+
+    # The cap comparison uses HALE's own plan: it's the only week this app is actually
+    # responsible for, and the figure has to mean one specific thing to be actionable.
+    hale = by_source.get(GENERATOR_SOURCE, {"hours": 0.0, "unknownSessions": 0})
+    cap, demand = float(plan.weekly_hours_cap), hale["hours"]
+    result.update({
         "capHours": cap,
         "demandHours": demand,
-        "unknownSessions": unknown,
+        "unknownSessions": hale["unknownSessions"],
         "overBy": round(demand - cap, 2) if demand > cap else None,
         # A conflict is *surfaced*, never auto-resolved. Silently shrinking the primary
         # goal's long run to fit a cap is explicitly rejected in the design doc: the
         # honest options (raise the cap, drop a supporting goal, move a race date) are
         # the athlete's call, not the generator's.
         "isOverCap": demand > cap,
-    }
+    })
+    return result
 
 
 def _distribution_would_break(db, user_id, date, candidate_hard: bool) -> bool:

@@ -38,6 +38,32 @@ export function PlanScheduleSettings({ plan }: { plan: TrainingPlan }) {
     updatePlan.mutate({ planId: plan.id, weeklyHoursCap: n })
   }
 
+  // Weekday work window, applied Mon-Fri. Deliberately one window rather than a
+  // per-day editor: the schedule here is fixed Mon-Fri, and a seven-row time grid for
+  // a value that's the same five times is friction with no information gain. A genuinely
+  // varying week would need the per-day form the API already accepts.
+  const wd = plan.timeBudget.find((d) => d.weekday === 0)
+  const [workStart, setWorkStart] = useState(wd?.workStart ?? "")
+  const [workEnd, setWorkEnd] = useState(wd?.workEnd ?? "")
+
+  function saveWork(start: string, end: string) {
+    if (!start || !end) {
+      updatePlan.mutate({ planId: plan.id, workSchedule: null })
+      return
+    }
+    const schedule: Record<string, { start: string; end: string; breakHours: number }> = {}
+    for (let d = 0; d <= 4; d++) schedule[String(d)] = { start, end, breakHours: 1 }
+    updatePlan.mutate({ planId: plan.id, workSchedule: schedule })
+  }
+
+  const budget = plan.timeBudget.filter((d) => d.freeHours != null)
+  const weeklyTrainable = budget.reduce((s, d) => s + (d.capHours ?? 0), 0)
+  const longest = plan.hours?.longestSessionHours ?? null
+  // The constraint that actually binds: a long session has to fit *some* day, and as a
+  // marathon long run grows past a weekday's window only the weekend days remain.
+  const daysFittingLongest =
+    longest != null ? budget.filter((d) => (d.capHours ?? 0) >= longest).length : null
+
   return (
     <div className="border-border rounded-lg border">
       <button
@@ -119,6 +145,81 @@ export function PlanScheduleSettings({ plan }: { plan: TrainingPlan }) {
           </div>
 
           <div className="flex flex-col gap-1.5">
+            <Label>Work hours (Mon–Fri)</Label>
+            <div className="flex items-center gap-2">
+              <Input
+                type="time" className="h-8 w-28" value={workStart}
+                onChange={(e) => setWorkStart(e.target.value)}
+                onBlur={() => saveWork(workStart, workEnd)}
+              />
+              <span className="text-muted-foreground text-xs">to</span>
+              <Input
+                type="time" className="h-8 w-28" value={workEnd}
+                onChange={(e) => setWorkEnd(e.target.value)}
+                onBlur={() => saveWork(workStart, workEnd)}
+              />
+            </div>
+            <p className="text-hale-faint text-[11px] leading-relaxed">
+              Assumes an hour for lunch. This is the one piece HALE can't work out on its
+              own — your sleep comes from Garmin, your work schedule doesn't.
+            </p>
+          </div>
+
+          {budget.length > 0 && (
+            <div className="flex flex-col gap-1.5">
+              <Label>When you can actually train</Label>
+              <div className="overflow-x-auto">
+                <table className="w-full text-xs tabular-nums">
+                  <thead className="text-hale-faint">
+                    <tr>
+                      <th className="py-0.5 pr-2 text-left font-normal">Day</th>
+                      <th className="py-0.5 pr-2 text-left font-normal">Awake</th>
+                      <th className="py-0.5 pr-2 text-right font-normal">Free</th>
+                      <th className="py-0.5 text-right font-normal">Trainable</th>
+                    </tr>
+                  </thead>
+                  <tbody className="text-muted-foreground">
+                    {budget.map((d) => (
+                      <tr key={d.weekday}>
+                        <td className="py-0.5 pr-2">{DAYS[d.weekday]}</td>
+                        <td className="py-0.5 pr-2">
+                          {d.wakeTime}–{d.bedTime}
+                        </td>
+                        <td className="py-0.5 pr-2 text-right">{d.freeHours?.toFixed(1)}h</td>
+                        <td
+                          className={cn(
+                            "py-0.5 text-right",
+                            longest != null && (d.capHours ?? 0) >= longest && "text-hale-hot",
+                          )}
+                        >
+                          {d.capHours?.toFixed(1)}h
+                        </td>
+                      </tr>
+                    ))}
+                  </tbody>
+                </table>
+              </div>
+              <p className="text-hale-faint text-[11px] leading-relaxed">
+                Awake window is measured from your Garmin sleep data. <em>Free</em> is that
+                minus work — real arithmetic. <em>Trainable</em> is a rough third of free
+                time, capped at 4h: an estimate of what's sustainable, not a target, since
+                free time also has to cover meals, family and winding down.
+              </p>
+              <p className="text-muted-foreground text-xs">
+                About {weeklyTrainable.toFixed(1)}h a week could go to training.
+              </p>
+              {/* The genuinely binding constraint, and the reason this table exists. */}
+              {longest != null && daysFittingLongest != null && (
+                <p className={cn("text-xs", daysFittingLongest === 0 && "text-hale-hot")}>
+                  {daysFittingLongest === 0
+                    ? `This week's longest session (${longest.toFixed(1)}h) doesn't fit any day's window.`
+                    : `This week's longest session is ${longest.toFixed(1)}h — it fits ${daysFittingLongest} of your ${budget.length} days (highlighted).`}
+                </p>
+              )}
+            </div>
+          )}
+
+          <div className="flex flex-col gap-1.5">
             <Label htmlFor="weekly-hours-cap">Weekly hours available</Label>
             <div className="flex items-center gap-2">
               <Input
@@ -144,7 +245,7 @@ export function PlanScheduleSettings({ plan }: { plan: TrainingPlan }) {
               much you <em>have</em> trained isn't how much you're <em>able</em> to.
             </p>
 
-            {plan.hours && (
+            {plan.hours && plan.hours.capHours != null && plan.hours.demandHours != null && (
               <div className="text-xs">
                 <span className={plan.hours.isOverCap ? "text-hale-hot" : "text-muted-foreground"}>
                   This week's HALE sessions: {plan.hours.demandHours.toFixed(1)}h of{" "}
@@ -172,6 +273,32 @@ export function PlanScheduleSettings({ plan }: { plan: TrainingPlan }) {
                 <p className="text-hale-faint mt-0.5 leading-relaxed">
                   Counts HALE's own prescribed sessions only — not your Garmin plan's,
                   since those overlap on the same days.
+                </p>
+              </div>
+            )}
+
+            {/* Two planners genuinely disagree and by how much is the useful signal —
+                so they're shown side by side rather than summed (summing them would
+                triple-count days where all three prescribe something). */}
+            {plan.hours && Object.keys(plan.hours.bySource).length > 0 && (
+              <div className="text-xs">
+                <div className="text-muted-foreground mb-0.5">This week, by planner:</div>
+                {Object.entries(plan.hours.bySource)
+                  .sort(([a], [b]) => a.localeCompare(b))
+                  .map(([src, v]) => (
+                    <div key={src} className="text-muted-foreground">
+                      <span className="capitalize">{src === "generator" ? "HALE" : src}</span>:{" "}
+                      <span className="tabular-nums">{v.hours.toFixed(1)}h</span>
+                      {v.unknownSessions > 0 && (
+                        <span className="text-hale-faint">
+                          {" "}
+                          (+{v.unknownSessions} without a set duration)
+                        </span>
+                      )}
+                    </div>
+                  ))}
+                <p className="text-hale-faint mt-0.5 leading-relaxed">
+                  You do one of these per day, not all — so these aren't added together.
                 </p>
               </div>
             )}

@@ -104,3 +104,86 @@ def test_malformed_rows_are_skipped_not_crashed(db, user_id, sleep_night, monkey
         db.add(DailySteps(date=_recent(i).isoformat(), user_id=user_id, sleep_stages_json=bad))
     db.commit()
     assert stats.typical_wake_time(db, user_id, lookback_days=60) == "06:00"
+
+
+# ---------- bedtime + daily time budget ----------
+
+
+def test_bedtime_median_does_not_wrap_around_midnight(db, user_id, monkeypatch):
+    """Averaging clock times across midnight naively puts the median halfway round the
+    dial — 23:50 and 00:10 average to ~12:00, turning a midnight sleeper into a midday
+    napper. Times past midnight are normalized before the median for exactly this."""
+    monkeypatch.setattr(stats, "user_timezone", lambda uid=None: "UTC")
+    for i, start in enumerate(["23:50", "00:10", "23:55", "00:05", "00:00"], start=1):
+        d = _recent(i)
+        segs = [{"start": f"{d.isoformat()}T{start}:00.0", "end": f"{d.isoformat()}T07:00:00.0",
+                 "stage": "light"}]
+        db.add(DailySteps(date=d.isoformat(), user_id=user_id, sleep_stages_json=json.dumps(segs)))
+    db.commit()
+    bed = stats.typical_bed_time(db, user_id)
+    assert bed in ("00:00", "23:55", "00:05"), f"midnight wrap mishandled: {bed}"
+
+
+def test_time_budget_subtracts_work_from_the_awake_window(db, user_id, sleep_night, monkeypatch):
+    """The whole point: free time is awake time minus work, computed from real sleep."""
+    monkeypatch.setattr(stats, "user_timezone", lambda uid=None: "UTC")
+    for i in range(1, 29):
+        sleep_night(_recent(i), "06:00")  # UTC tz -> wake 06:00 local
+    plan = type("P", (), {
+        "work_schedule_json": json.dumps({str(d): {"start": "07:00", "end": "17:00", "breakHours": 1}
+                                           for d in range(5)}),
+        "daily_training_cap_json": None,
+    })()
+    budget = stats.daily_time_budget(db, user_id, plan)
+    assert len(budget) == 7
+    weekday = budget[0]
+    assert weekday["workHours"] == 9.0  # 10h span minus a 1h break
+    assert weekday["freeHours"] is not None and weekday["freeHours"] > 0
+    saturday = budget[5]
+    assert saturday["workHours"] is None, "no work declared for Saturday"
+    assert saturday["freeHours"] > weekday["freeHours"], "a non-work day must have more free time"
+
+
+def test_suggested_cap_is_a_fraction_and_is_ceilinged(db, user_id, sleep_night, monkeypatch):
+    """A rest day with 16 free hours does not mean 16 trainable ones — 'every waking
+    moment can't be training'. The suggestion is a share of free time, hard-ceilinged."""
+    monkeypatch.setattr(stats, "user_timezone", lambda uid=None: "UTC")
+    for i in range(1, 29):
+        sleep_night(_recent(i), "06:00")
+    budget = stats.daily_time_budget(db, user_id, None)  # no work at all
+    for day in budget:
+        assert day["suggestedCapHours"] <= stats.DAILY_TRAINING_CEILING_HOURS
+        assert day["suggestedCapHours"] < day["freeHours"], "cap must never equal all free time"
+
+
+def test_a_manual_cap_override_wins_over_the_suggestion(db, user_id, sleep_night, monkeypatch):
+    """How much of your own free time is really trainable is a work/life judgement that
+    belongs to the athlete, so the heuristic must be overridable."""
+    monkeypatch.setattr(stats, "user_timezone", lambda uid=None: "UTC")
+    for i in range(1, 29):
+        sleep_night(_recent(i), "06:00")
+    plan = type("P", (), {"work_schedule_json": None,
+                          "daily_training_cap_json": json.dumps({"5": 3.5})})()
+    budget = stats.daily_time_budget(db, user_id, plan)
+    assert budget[5]["capHours"] == 3.5
+    assert budget[5]["isOverridden"] is True
+    assert budget[0]["isOverridden"] is False
+    assert budget[0]["capHours"] == budget[0]["suggestedCapHours"]
+
+
+def test_no_sleep_data_yields_null_not_a_guess(db, user_id):
+    """Same discipline as typical_wake_time — no data means no number."""
+    budget = stats.daily_time_budget(db, user_id, None)
+    assert all(d["freeHours"] is None and d["suggestedCapHours"] is None for d in budget)
+
+
+def test_malformed_work_schedule_degrades_to_no_work(db, user_id, sleep_night, monkeypatch):
+    """A bad stored value must not take the Workouts tab down."""
+    monkeypatch.setattr(stats, "user_timezone", lambda uid=None: "UTC")
+    for i in range(1, 29):
+        sleep_night(_recent(i), "06:00")
+    for bad in ("not json", "[]", '{"0": "morning"}', '{"9": {"start":"07:00","end":"17:00"}}',
+                '{"0": {"start":"nope","end":"17:00"}}'):
+        plan = type("P", (), {"work_schedule_json": bad, "daily_training_cap_json": None})()
+        budget = stats.daily_time_budget(db, user_id, plan)
+        assert all(d["workHours"] is None for d in budget), f"{bad!r} was not rejected"

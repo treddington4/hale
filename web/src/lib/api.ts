@@ -233,11 +233,33 @@ export interface PlanGoalRef {
 // Garmin and the coach also write sessions for the same days and the athlete does one
 // of them, so summing every source would roughly triple the figure. The UI must say so.
 export interface PlanHours {
-  capHours: number
-  demandHours: number
-  unknownSessions: number // sessions with no derivable duration -> demandHours is a floor
+  // Per planner, never summed: Garmin, the coach and HALE all write sessions for the
+  // same days and you do one of them, so a combined total would roughly triple it.
+  bySource: Record<string, { hours: number; unknownSessions: number }>
+  longestSessionHours: number | null
+  // Cap comparison uses HALE's own plan — the only week this app is responsible for.
+  // All null when no cap is set: nothing to be over, and none is invented.
+  capHours: number | null
+  demandHours: number | null
+  unknownSessions: number
   overBy: number | null
   isOverCap: boolean
+}
+
+// One weekday's availability. freeHours is real arithmetic (awake window minus declared
+// work); suggestedCapHours is an explicit heuristic about work/life balance, which is
+// why it can be overridden. Nulls mean "not enough data", never a guess.
+export interface DayTimeBudget {
+  weekday: number // 0=Mon
+  wakeTime: string | null
+  bedTime: string | null
+  workStart: string | null
+  workEnd: string | null
+  workHours: number | null
+  freeHours: number | null
+  suggestedCapHours: number | null
+  capHours: number | null
+  isOverridden: boolean
 }
 
 export interface TrainingPlan {
@@ -248,8 +270,9 @@ export interface TrainingPlan {
   availableDays: number[] | null // 0=Mon..6=Sun; null = every day available
   longRunDay: number | null // 0=Mon..6=Sun; null = today's hardcoded skeleton default
   sleepConstraintMode: "soft" | "off"
-  hours: PlanHours | null // null when no cap is set — nothing to be over
+  hours: PlanHours | null
   typicalWakeTime: string | null // "HH:MM" local; null until enough real nights exist
+  timeBudget: DayTimeBudget[]
   goals: PlanGoalRef[]
 }
 
@@ -731,6 +754,8 @@ export const api = {
       availableDays: number[] | null
       longRunDay: number | null
       sleepConstraintMode: "soft" | "off"
+      workSchedule: Record<string, { start: string; end: string; breakHours?: number }> | null
+      dailyTrainingCaps: Record<string, number> | null
     }>,
   ) => request<TrainingPlan>(`/api/plans/${planId}`, { method: "PATCH", body: JSON.stringify(body) }),
   planWeeks: (planId: string, goalId: string, opts?: { weeksBack?: number; weeksForward?: number }) => {

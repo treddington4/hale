@@ -69,8 +69,24 @@ def _plan_to_dict(db, p: TrainingPlan, user_id: str) -> dict:
             db, user_id, generator._week_start(local_today(user_id)), plan=p),
         # None until enough real nights exist; never guessed from a couple of nights.
         "typicalWakeTime": stats.typical_wake_time(db, user_id),
+        # Per-weekday free hours (real: awake window minus declared work) and a
+        # suggested trainable ceiling (a heuristic — see stats.TRAINING_SHARE_OF_FREE_TIME).
+        "timeBudget": stats.daily_time_budget(db, user_id, p),
         "goals": goals,
     }
+
+
+def _valid_hhmm(v) -> bool:
+    if not isinstance(v, str):
+        return False
+    parts = v.split(":")
+    if len(parts) != 2:
+        return False
+    try:
+        h, m = int(parts[0]), int(parts[1])
+    except (TypeError, ValueError):
+        return False
+    return 0 <= h <= 23 and 0 <= m <= 59
 
 
 def _json_or_none(raw):
@@ -212,6 +228,49 @@ async def update_plan(plan_id: str, request: Request, user_id: str = Depends(aut
                 if not isinstance(d, int) or isinstance(d, bool) or not 0 <= d <= 6:
                     raise HTTPException(400, "longRunDay must be a weekday int 0-6 (0=Mon), or null")
             p.long_run_day = d
+
+        if "workSchedule" in body:
+            ws = body["workSchedule"]
+            if ws is None:
+                p.work_schedule_json = None
+            else:
+                if not isinstance(ws, dict):
+                    raise HTTPException(400, "workSchedule must be an object keyed by weekday, or null")
+                cleaned = {}
+                for k, v in ws.items():
+                    try:
+                        day = int(k)
+                    except (TypeError, ValueError):
+                        raise HTTPException(400, f"workSchedule key {k!r} is not a weekday int")
+                    if not 0 <= day <= 6:
+                        raise HTTPException(400, "workSchedule weekdays must be 0-6 (0=Mon)")
+                    if not isinstance(v, dict) or not _valid_hhmm(v.get("start")) or not _valid_hhmm(v.get("end")):
+                        raise HTTPException(400, f"workSchedule[{k}] needs HH:MM start and end")
+                    brk = v.get("breakHours") or 0
+                    try:
+                        brk = float(brk)
+                    except (TypeError, ValueError):
+                        raise HTTPException(400, f"workSchedule[{k}].breakHours must be a number")
+                    cleaned[str(day)] = {"start": v["start"], "end": v["end"], "breakHours": brk}
+                p.work_schedule_json = json.dumps(cleaned) if cleaned else None
+
+        if "dailyTrainingCaps" in body:
+            caps = body["dailyTrainingCaps"]
+            if caps is None:
+                p.daily_training_cap_json = None
+            else:
+                if not isinstance(caps, dict):
+                    raise HTTPException(400, "dailyTrainingCaps must be an object keyed by weekday, or null")
+                cleaned = {}
+                for k, v in caps.items():
+                    try:
+                        day, hours = int(k), float(v)
+                    except (TypeError, ValueError):
+                        raise HTTPException(400, f"dailyTrainingCaps[{k}] must be weekday int -> hours")
+                    if not 0 <= day <= 6 or not 0 <= hours <= 24:
+                        raise HTTPException(400, "dailyTrainingCaps needs weekday 0-6 and 0-24 hours")
+                    cleaned[str(day)] = hours
+                p.daily_training_cap_json = json.dumps(cleaned) if cleaned else None
 
         if "sleepConstraintMode" in body:
             mode = body["sleepConstraintMode"]

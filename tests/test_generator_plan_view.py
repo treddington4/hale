@@ -464,11 +464,17 @@ def _gen_workout(db, user_id, date_iso, **kw):
     return w
 
 
-def test_no_cap_means_no_conflict_object_at_all(db, user_id, today, make_goal, make_plan):
-    """No cap set is not 'a cap of zero' and not 'over budget' — there is simply nothing
-    to compare against, and inventing a cap from history is what this design refuses."""
+def test_no_cap_means_no_conflict_claim(db, user_id, today, make_goal, make_plan):
+    """No cap set is not 'a cap of zero' and not 'over budget' — there is nothing to
+    compare against, and inventing a cap from history is what this design refuses. The
+    per-planner breakdown is still real and is returned either way; only the cap
+    comparison is withheld."""
     plan = make_plan(make_goal("Marathon", today + timedelta(weeks=20)))
-    assert generator.weekly_hours_plan(db, user_id, _monday(today), plan=plan) is None
+    h = generator.weekly_hours_plan(db, user_id, _monday(today), plan=plan)
+    assert h["capHours"] is None
+    assert h["demandHours"] is None
+    assert h["isOverCap"] is False
+    assert h["overBy"] is None
 
 
 def test_hours_demand_sums_generator_sessions(db, user_id, today, plan_with_cap):
@@ -491,10 +497,12 @@ def test_hours_conflict_is_surfaced_with_real_numbers(db, user_id, today, plan_w
     assert h["capHours"] == 1.0
 
 
-def test_other_planners_sessions_are_excluded(db, user_id, today, plan_with_cap):
+def test_planners_are_reported_separately_never_summed(db, user_id, today, plan_with_cap):
     """The overcount trap, confirmed against real production: Garmin, Coach and HALE all
     write a row for the same date and the athlete does ONE of them. Summing every source
-    reported ~3.9h for a single day and made the cap meaningless."""
+    reported ~3.9h for a single day and made the cap meaningless. Each planner's week is
+    reported on its own, and the cap comparison uses HALE's — the only plan this app is
+    responsible for."""
     from app.models import Workout
     plan = plan_with_cap(5.0)
     wk = _monday(today)
@@ -505,7 +513,42 @@ def test_other_planners_sessions_are_excluded(db, user_id, today, plan_with_cap)
                        workout_type="easy", activity_type="Run", target_duration_sec=4500,
                        created_at="2026-01-01T00:00:00+00:00"))
     db.commit()
-    assert generator.weekly_hours_plan(db, user_id, wk, plan=plan)["demandHours"] == pytest.approx(1.0)
+    h = generator.weekly_hours_plan(db, user_id, wk, plan=plan)
+    assert h["demandHours"] == pytest.approx(1.0), "cap compares against HALE's plan only"
+    assert h["bySource"]["generator"]["hours"] == pytest.approx(1.0)
+    assert h["bySource"]["garmin"]["hours"] == pytest.approx(1.25)
+    assert h["bySource"]["coach"]["hours"] == pytest.approx(1.25)
+    total = sum(v["hours"] for v in h["bySource"].values())
+    assert h["demandHours"] < total, "planners must never be summed into one demand figure"
+
+
+def test_hale_distance_sessions_get_hours_from_recent_pace(db, user_id, today, plan_with_cap, make_activity):
+    """The gap that made this whole feature inert: HALE prescribes distance with no pace,
+    so every one of its sessions read as unknown-duration. Production derived 0.00h
+    across HALE's 3 sessions while Garmin's derived 5.57h — so an hours check scoped to
+    HALE measured precisely the plan whose hours couldn't be computed."""
+    plan = plan_with_cap(10.0)
+    wk = _monday(today)
+    for i in range(4):  # real history -> a usable typical pace (600 s/mi)
+        make_activity(f"strava_p{i}", "Run", date=(wk - timedelta(days=i + 1)).isoformat(),
+                      distance_mi=5.0, moving_time_sec=3000)
+    _gen_workout(db, user_id, wk.isoformat(), target_distance_mi=6.0)  # no pace, no duration
+    h = generator.weekly_hours_plan(db, user_id, wk, plan=plan)
+    assert h["unknownSessions"] == 0, "a distance-only HALE session must no longer read as unknown"
+    assert h["demandHours"] == pytest.approx(1.0)  # 6mi at 10:00/mi
+
+
+def test_an_explicit_pace_still_beats_the_population_median(db, user_id, today, plan_with_cap, make_activity):
+    """The fallback is a median across recent runs; a session that states its own pace
+    is a specific prescription and must win."""
+    plan = plan_with_cap(10.0)
+    wk = _monday(today)
+    for i in range(4):
+        make_activity(f"strava_q{i}", "Run", date=(wk - timedelta(days=i + 1)).isoformat(),
+                      distance_mi=5.0, moving_time_sec=3000)  # 600 s/mi
+    _gen_workout(db, user_id, wk.isoformat(), target_distance_mi=6.0, target_pace_sec_per_mi=480)
+    h = generator.weekly_hours_plan(db, user_id, wk, plan=plan)
+    assert h["demandHours"] == pytest.approx(0.8)  # 6mi at 8:00/mi, not the 10:00 median
 
 
 def test_sessions_without_a_duration_are_reported_not_silently_zero(db, user_id, today, plan_with_cap):

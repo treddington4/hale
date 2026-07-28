@@ -1052,6 +1052,200 @@ def fetch_article_text(url: str, max_chars: int = 5000) -> str | None:
 TYPICAL_WAKE_LOOKBACK_DAYS = 28
 TYPICAL_WAKE_MIN_NIGHTS = 5
 
+TYPICAL_PACE_LOOKBACK_DAYS = 60
+TYPICAL_PACE_MIN_RUNS = 3
+
+
+def recent_typical_pace_sec_per_mi(db, user_id: str = DEFAULT_USER_ID, activity_type: str = "Run",
+                                   lookback_days: int = TYPICAL_PACE_LOOKBACK_DAYS) -> float | None:
+    """Median recent pace, for turning a prescribed *distance* into an estimated
+    duration. Returns None below TYPICAL_PACE_MIN_RUNS real activities rather than
+    guessing.
+
+    Exists because HALE's own generator prescribes distance with no pace, so
+    generator.workout_duration_hours had nothing to read and reported every HALE session
+    as "unknown duration" — verified in production, where HALE's week derived 0.00h
+    across 3 sessions while Garmin's derived 5.57h. That made an hours check that
+    excluded Garmin (to avoid triple-counting overlapping planners) measure precisely
+    the one plan whose hours were uncomputable.
+
+    Routes through _all_runs for the cross-source dedup every aggregate here requires —
+    a Strava and a Garmin copy of the same run must not both weight the median.
+    Median, not mean, for the usual reason: one 20-minute shakeout or one race
+    shouldn't move a typical-pace figure."""
+    cutoff = (local_today(user_id) - timedelta(days=lookback_days)).isoformat()
+    paces = [
+        r.moving_time_sec / r.distance_mi
+        for r in _all_runs(db, activity_type, user_id)
+        if r.date >= cutoff and (r.distance_mi or 0) > 1.0 and (r.moving_time_sec or 0) > 0
+    ]
+    if len(paces) < TYPICAL_PACE_MIN_RUNS:
+        return None
+    return float(median(sorted(paces)))
+
+
+# Share of genuinely free time that's realistic to spend training. Not a target and not
+# a recommendation — a ceiling. Straight from the user's own framing: "if only 3 hours
+# free between work+bed then maybe cap at 1 hour... every waking moment can't be
+# training." Free time also has to absorb meals, family, chores and wind-down.
+TRAINING_SHARE_OF_FREE_TIME = 0.33
+# Absolute per-day ceiling regardless of how much free time exists. A rest day with 16
+# free hours does not mean 5.5 trainable ones. Set to comfortably contain a peak
+# marathon long run (20mi at a ~10:00/mi easy pace is ~3.4h) without implying a whole
+# free weekend day is available to train.
+DAILY_TRAINING_CEILING_HOURS = 4.0
+
+
+def daily_time_budget(db, user_id: str = DEFAULT_USER_ID, plan=None) -> list[dict]:
+    """Per-weekday picture of when training can actually happen: the awake window from
+    real sleep data, minus declared work, yielding free hours and a suggested trainable
+    ceiling.
+
+    Purely informational by design — nothing here changes a prescription. It answers
+    "does this fit my life?" rather than "what should I do?", and the two must not be
+    confused: this is a constraint surface, not a training plan.
+
+    `freeHours` is real arithmetic on real data. `suggestedCapHours` is explicitly a
+    heuristic (see TRAINING_SHARE_OF_FREE_TIME) and is labelled as such wherever it
+    surfaces, because unlike the wake times it is not measured — it's a judgement about
+    work/life balance that belongs to the athlete, which is why an override exists.
+
+    Returns 7 entries (Mon..Sun). `freeHours`/`suggestedCapHours` are None for any day
+    with no sleep data — no fabricated fallback, matching typical_wake_time."""
+    work = _parse_work_schedule(getattr(plan, "work_schedule_json", None) if plan else None)
+    overrides = _parse_daily_caps(getattr(plan, "daily_training_cap_json", None) if plan else None)
+
+    out = []
+    for weekday in range(7):
+        wake = typical_wake_time(db, user_id, lookback_days=56, min_nights=2, weekday=weekday)
+        bed = typical_bed_time(db, user_id, lookback_days=56, min_nights=2, weekday=weekday)
+        w = work.get(weekday)
+        work_hours = None
+        if w:
+            work_hours = max(0.0, (_hhmm_to_min(w["end"]) - _hhmm_to_min(w["start"])) / 60.0
+                             - float(w.get("breakHours") or 0))
+
+        free = suggested = None
+        if wake and bed:
+            # Bedtime is normalized past midnight in typical_bed_time, so this is a
+            # plain subtraction rather than wrap-around arithmetic.
+            awake = (_hhmm_to_min(bed) - _hhmm_to_min(wake)) / 60.0
+            if awake < 0:
+                awake += 24
+            free = round(max(0.0, awake - (work_hours or 0.0)), 1)
+            suggested = round(min(free * TRAINING_SHARE_OF_FREE_TIME, DAILY_TRAINING_CEILING_HOURS), 1)
+
+        cap = overrides.get(weekday, suggested)
+        out.append({
+            "weekday": weekday, "wakeTime": wake, "bedTime": bed,
+            "workStart": w["start"] if w else None, "workEnd": w["end"] if w else None,
+            "workHours": round(work_hours, 1) if work_hours is not None else None,
+            "freeHours": free,
+            "suggestedCapHours": suggested,
+            "capHours": cap,
+            "isOverridden": weekday in overrides,
+        })
+    return out
+
+
+def typical_bed_time(db, user_id: str = DEFAULT_USER_ID, lookback_days: int = TYPICAL_WAKE_LOOKBACK_DAYS,
+                     min_nights: int = TYPICAL_WAKE_MIN_NIGHTS, weekday: int | None = None) -> str | None:
+    """Habitual bedtime as "HH:MM" local — the start of the night's first sleep segment.
+    Same GMT-conversion and median-not-mean reasoning as typical_wake_time; see there.
+
+    Times after midnight are normalized to 24h+ internally so the median of 23:50 and
+    00:10 is 00:00 rather than ~11:60 — averaging clock times across midnight without
+    that lands halfway round the dial, which is how a midnight sleeper reads as a
+    midday napper. The returned string is normalized back to a real clock time."""
+    from zoneinfo import ZoneInfo
+    tz = ZoneInfo(user_timezone(user_id))
+    cutoff = (local_today(user_id) - timedelta(days=lookback_days)).isoformat()
+    rows = (
+        db.query(DailySteps)
+        .filter(DailySteps.date >= cutoff, DailySteps.sleep_stages_json.isnot(None),
+                owned_by(DailySteps.user_id, user_id))
+        .all()
+    )
+    minutes = []
+    for r in rows:
+        try:
+            segments = json.loads(r.sleep_stages_json or "[]")
+        except (TypeError, ValueError):
+            continue
+        if not segments:
+            continue
+        naive = _parse_garmin_timestamp(segments[0].get("start"))
+        if naive is None:
+            continue
+        local = naive.replace(tzinfo=timezone.utc).astimezone(tz)
+        if weekday is not None and local.weekday() != weekday:
+            continue
+        m = local.hour * 60 + local.minute
+        if m < 12 * 60:  # after midnight -> treat as late evening for ordering
+            m += 24 * 60
+        minutes.append(m)
+    if len(minutes) < min_nights:
+        return None
+    mid = int(median(sorted(minutes))) % (24 * 60)
+    return f"{mid // 60:02d}:{mid % 60:02d}"
+
+
+def _hhmm_to_min(t: str) -> int:
+    h, m = t.split(":")
+    return int(h) * 60 + int(m)
+
+
+def _parse_work_schedule(raw) -> dict:
+    """{"0": {"start":"07:00","end":"17:00","breakHours":1}} keyed by weekday (0=Mon).
+    A missing weekday means no work that day. Malformed input degrades to "no work
+    declared" rather than raising — this feeds a display surface, and a bad stored value
+    must not take the Workouts tab down."""
+    if not raw:
+        return {}
+    try:
+        parsed = json.loads(raw)
+    except (TypeError, ValueError):
+        return {}
+    if not isinstance(parsed, dict):
+        return {}
+    out = {}
+    for k, v in parsed.items():
+        try:
+            day = int(k)
+        except (TypeError, ValueError):
+            continue
+        if not 0 <= day <= 6 or not isinstance(v, dict):
+            continue
+        start, end = v.get("start"), v.get("end")
+        if not isinstance(start, str) or not isinstance(end, str):
+            continue
+        try:
+            _hhmm_to_min(start), _hhmm_to_min(end)
+        except (TypeError, ValueError):
+            continue
+        out[day] = {"start": start, "end": end, "breakHours": v.get("breakHours") or 0}
+    return out
+
+
+def _parse_daily_caps(raw) -> dict:
+    if not raw:
+        return {}
+    try:
+        parsed = json.loads(raw)
+    except (TypeError, ValueError):
+        return {}
+    if not isinstance(parsed, dict):
+        return {}
+    out = {}
+    for k, v in parsed.items():
+        try:
+            day, hours = int(k), float(v)
+        except (TypeError, ValueError):
+            continue
+        if 0 <= day <= 6 and 0 <= hours <= 24:
+            out[day] = hours
+    return out
+
 
 def _parse_garmin_timestamp(raw: str):
     """Garmin's sleep-segment timestamps look like "2026-07-27T10:29:53.0" — one
