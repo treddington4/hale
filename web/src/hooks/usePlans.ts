@@ -5,17 +5,18 @@ export function usePlans() {
   return useQuery({ queryKey: ["plans"], queryFn: api.plans })
 }
 
-export function usePlanWeeks(planId: string, opts?: { weeksBack?: number; weeksForward?: number }) {
+export function usePlanWeeks(planId: string, goalId: string, opts?: { weeksBack?: number; weeksForward?: number }) {
   return useQuery({
-    queryKey: ["planWeeks", planId, opts?.weeksBack, opts?.weeksForward],
-    queryFn: () => api.planWeeks(planId, opts),
+    queryKey: ["planWeeks", planId, goalId, opts?.weeksBack, opts?.weeksForward],
+    queryFn: () => api.planWeeks(planId, goalId, opts),
   })
 }
 
-export function useStartPlan() {
+export function useAddPlanGoal() {
   const qc = useQueryClient()
   return useMutation({
-    mutationFn: (goalId: string) => api.startPlan(goalId),
+    mutationFn: ({ goalId, role }: { goalId: string; role?: "primary" | "supporting" }) =>
+      api.addPlanGoal(goalId, role),
     onSuccess: () => qc.invalidateQueries({ queryKey: ["plans"] }),
   })
 }

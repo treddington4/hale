@@ -212,20 +212,32 @@ export interface GoalProgress {
   daysRemaining?: number | null
 }
 
-// P20 — goal-tied training plan view. Visualization only: creating a plan changes
-// nothing about what the nightly generator actually prescribes (see P21 for when a
-// started plan starts steering real generation).
-export interface TrainingPlan {
-  id: string
+// P20 shipped one TrainingPlan per goal. P21 (docs/P21_CONCURRENT_GOALS.md) redesigned
+// this to ONE active plan per user, serving multiple goals via PlanGoalRef in a role —
+// "realistically the user can only do one training and the plans should intertwine."
+// The plan's primary goal now steers what the nightly generator actually prescribes
+// (generator.resolve_periodization_goal); supporting goals get their own honest
+// projection of what they alone would need, not a claim about what's really scheduled.
+export interface PlanGoalRef {
   goalId: string
   goalName: string | null
   goalTargetDate: string | null
+  role: "primary" | "supporting"
+  // False means this goal isn't the one the generator is currently periodizing for —
+  // true only for the plan's primary goal while it's still a live active race. A
+  // supporting goal's week series describes its own arc, not what's actually prescribed.
+  isActivePeriodizationGoal: boolean
+}
+
+export interface TrainingPlan {
+  id: string
   status: "active" | "archived"
   createdAt: string
-  // False means this plan's goal isn't the one the generator is currently periodizing
-  // for (e.g. another, nearer race goal is winning) — the weeks below describe this
-  // goal's own arc, not what's actually being prescribed right now.
-  isActivePeriodizationGoal: boolean
+  weeklyHoursCap: number | null // null = no cap set; the user's own call, never fabricated
+  availableDays: number[] | null // 0=Mon..6=Sun; null = every day available
+  longRunDay: number | null // 0=Mon..6=Sun; null = today's hardcoded skeleton default
+  sleepConstraintMode: "soft" | "off"
+  goals: PlanGoalRef[]
 }
 
 export interface PlanWeek {
@@ -240,7 +252,13 @@ export interface PlanWeek {
   isCurrentWeek: boolean
 }
 
-export interface PlanWeeksResponse extends TrainingPlan {
+export interface PlanWeeksResponse {
+  planId: string
+  goalId: string
+  goalName: string | null
+  goalTargetDate: string | null
+  role: "primary" | "supporting"
+  isActivePeriodizationGoal: boolean
   weeks: PlanWeek[]
   // Trailing 7 days including today. Not the same as the current week's actualMi — on a
   // Monday that one is legitimately 0.0 while this reflects a full week of training.
@@ -683,15 +701,18 @@ export const api = {
   updateGoal: (id: string, body: Partial<GoalInput> & { status?: GoalStatus }) =>
     request<Goal>(`/api/goals/${id}`, { method: "PATCH", body: JSON.stringify(body) }),
   deleteGoal: (id: string) => request<{ deleted: true }>(`/api/goals/${id}`, { method: "DELETE" }),
-  plans: () => request<TrainingPlan[]>("/api/plans"),
-  startPlan: (goalId: string) =>
-    request<TrainingPlan>("/api/plans", { method: "POST", body: JSON.stringify({ goalId }) }),
-  planWeeks: (planId: string, opts?: { weeksBack?: number; weeksForward?: number }) => {
-    const params = new URLSearchParams()
+  // Returns the user's single active plan, or null (see TrainingPlan's P21 docstring).
+  plans: () => request<TrainingPlan | null>("/api/plans"),
+  // Attaches goalId to the user's plan (creating it on first call). role omitted defaults
+  // to "primary" for the plan's first goal, "supporting" thereafter — pass it explicitly
+  // to add a supporting goal or to reassign which goal is primary.
+  addPlanGoal: (goalId: string, role?: "primary" | "supporting") =>
+    request<TrainingPlan>("/api/plans", { method: "POST", body: JSON.stringify({ goalId, role }) }),
+  planWeeks: (planId: string, goalId: string, opts?: { weeksBack?: number; weeksForward?: number }) => {
+    const params = new URLSearchParams({ goalId })
     if (opts?.weeksBack != null) params.set("weeksBack", String(opts.weeksBack))
     if (opts?.weeksForward != null) params.set("weeksForward", String(opts.weeksForward))
-    const qs = params.toString()
-    return request<PlanWeeksResponse>(`/api/plans/${planId}/weeks${qs ? `?${qs}` : ""}`)
+    return request<PlanWeeksResponse>(`/api/plans/${planId}/weeks?${params.toString()}`)
   },
 
   gear: () => request<Gear[]>("/api/gear"),

@@ -5,8 +5,11 @@ from sqlalchemy import (
 )
 from sqlalchemy.orm import declarative_base, sessionmaker
 from datetime import datetime, timezone
+import logging
 import os
 import uuid
+
+log = logging.getLogger("runlog")
 
 # P7a: STI discriminator values for activity families (must match P2's canonical types)
 STI_TYPE_RUN = "run"
@@ -613,26 +616,51 @@ class WeeklyPlan(Base):
 
 
 class TrainingPlan(Base):
-    """P20 — the entity the Workouts tab's plan view is tied to, created by "Start a Plan".
-    Deliberately thin: this is a *visualization* of the periodization math the generator
-    already does, not a competing planner, and nothing in generator.py depends on this
-    table existing yet (P21 is where a started plan begins steering real prescriptions).
+    """P20 shipped this as one row per goal. P21 redesign (docs/P21_CONCURRENT_GOALS.md,
+    superseding docs/P20_P21_DESIGN.md §2.1/2.3): one ACTIVE plan per user, not one per
+    goal — "realistically the user can only do one training and the plans should
+    intertwine... there are only so many hours in a day." Which goals a plan serves, and
+    in what role, is now PlanGoal below.
 
     Restricted to race-type goals at the route layer — phase/deload/ramp math is
     fundamentally "weeks until race date" and has no defined analog for a consistency or
     distance_target goal.
 
-    A brand-new table, so create_all() picks it up with no _MIGRATABLE_TABLES entry
-    needed, same as ApiToken/PushSubscription. Add one the moment a column is added here.
     Too new to have legacy-NULL user_id rows, so plain equality filtering (not owned_by())
     is correct — matches ApiToken's convention."""
     __tablename__ = "training_plans"
-    __table_args__ = (UniqueConstraint("user_id", "goal_id", name="uq_training_plan_user_goal"),)
 
     id = Column(String, primary_key=True)  # f"plan_{uuid.uuid4().hex[:12]}"
     user_id = Column(String, ForeignKey("users.id", ondelete="CASCADE"), nullable=False)
-    goal_id = Column(String, ForeignKey("goals.id", ondelete="CASCADE"), nullable=False)
     status = Column(String, default="active")  # "active" | "archived"
+    created_at = Column(String)
+
+    # P21 — real-life weekly time availability, the "hours in a day" ceiling §3.3's
+    # conflict check compares essential-hours demand against. Deliberately nullable with
+    # no computed default: this is the user's own call about sustainable bandwidth, not
+    # something derivable from training history (observed hours =/= available hours) —
+    # same "never fabricate a number" discipline as the dashboard cards. NULL = no cap
+    # enforced, conflict surfacing skipped, until the user sets it explicitly.
+    weekly_hours_cap = Column(Float, nullable=True)
+    available_days_json = Column(Text, nullable=True)  # e.g. "[0,2,3,5]", 0=Mon..6=Sun; NULL = every day available
+    long_run_day = Column(Integer, nullable=True)  # 0=Mon..6=Sun; NULL = today's hardcoded WEEKDAY_SKELETON[5]
+    sleep_constraint_mode = Column(String, default="soft")  # "soft" | "off" — see stats.typical_wake_time; no "hard"
+
+
+class PlanGoal(Base):
+    """P21 — which goals a TrainingPlan serves, and in what role. Exactly one "primary"
+    goal per plan (enforced at the route layer, not a DB constraint — see routes/plans.py);
+    any number of "supporting" goals. The primary owns periodization
+    (generator.resolve_periodization_goal reads it); supporting goals get a minimum-viable
+    dose out of the plan's remaining fungible budget (see docs/P21_CONCURRENT_GOALS.md §3.1).
+    A goal can only appear once per plan."""
+    __tablename__ = "plan_goals"
+    __table_args__ = (UniqueConstraint("training_plan_id", "goal_id", name="uq_plan_goal_plan_goal"),)
+
+    id = Column(String, primary_key=True)  # f"plangoal_{uuid.uuid4().hex[:12]}"
+    training_plan_id = Column(String, ForeignKey("training_plans.id", ondelete="CASCADE"), nullable=False)
+    goal_id = Column(String, ForeignKey("goals.id", ondelete="CASCADE"), nullable=False)
+    role = Column(String, default="supporting")  # "primary" | "supporting"
     created_at = Column(String)
 
 
@@ -800,6 +828,7 @@ def init_db():
     # anything below touches `runs` through the ORM — see its docstring.
     _migrate_backfill_sti_type()
     _migrate_daily_steps_composite_pk()
+    _migrate_training_plan_multi_goal()
     _migrate_sync_meta_to_user_keys()
     _backfill_detail_synced_at()
     _normalize_activity_types()
@@ -825,7 +854,11 @@ _MIGRATABLE_TABLES = [("runs", Run), ("daily_steps", DailySteps), ("chat_message
                        # Added when ride_days_per_week landed — this table already existed in
                        # every real deployment, so create_all() would never have added the
                        # column and the generator would read a nonexistent attribute.
-                       ("user_training_config", UserTrainingConfig)]
+                       ("user_training_config", UserTrainingConfig),
+                       # Added for any *future* additive TrainingPlan column — the P21 rebuild
+                       # itself (goal_id removal, new UNIQUE shape) is handled separately by
+                       # _migrate_training_plan_multi_goal(), since ADD COLUMN can't do that part.
+                       ("training_plans", TrainingPlan)]
 
 
 def _migrate_add_missing_columns():
@@ -920,6 +953,60 @@ def _migrate_backfill_sti_type():
             "UPDATE runs SET sti_type = ? WHERE sti_type IS NULL", (STI_TYPE_RUN,)
         )
         conn.commit()
+
+
+def _migrate_training_plan_multi_goal():
+    """P21 redesign (docs/P21_CONCURRENT_GOALS.md): TrainingPlan moves from one row per
+    goal (UniqueConstraint(user_id, goal_id), goal_id NOT NULL) to one active plan per
+    user, with the new PlanGoal table attaching goals in a role ("primary"/"supporting").
+    SQLite can't ALTER a UNIQUE constraint or drop a NOT NULL column, so this is a table
+    rebuild, same reason as _migrate_daily_steps_composite_pk below. Unlike that function,
+    this drops and recreates from scratch rather than reflecting+copying every column —
+    production held exactly one TrainingPlan row when this was written (verified), so
+    nothing is lost by the simpler path as long as that row's goal is preserved as its
+    plan's "primary" PlanGoal, which this does. Idempotent: no-ops once training_plans has
+    no goal_id column (a fresh install's create_all() already builds the new shape, so
+    this is a genuine no-op there too, not just an idempotent repeat)."""
+    with engine.connect() as conn:
+        info = conn.exec_driver_sql("PRAGMA table_info(training_plans)").fetchall()
+        col_names = {row[1] for row in info}
+        if "goal_id" not in col_names:
+            return
+
+        old_rows = conn.exec_driver_sql(
+            "SELECT id, user_id, goal_id, status, created_at FROM training_plans"
+        ).fetchall()
+        conn.exec_driver_sql("DROP TABLE training_plans")
+        conn.commit()
+
+    TrainingPlan.__table__.create(engine, checkfirst=True)
+    PlanGoal.__table__.create(engine, checkfirst=True)
+    if not old_rows:
+        return
+
+    session = SessionLocal()
+    try:
+        # Multiple old rows for the same user (one plan per goal, pre-redesign) collapse
+        # into that user's single new plan: the first row's goal becomes primary, any
+        # others become supporting — never silently dropped.
+        plan_id_by_user = {}
+        for pid, user_id, goal_id, status, created_at in old_rows:
+            if user_id not in plan_id_by_user:
+                plan_id_by_user[user_id] = pid
+                session.add(TrainingPlan(id=pid, user_id=user_id, status=status, created_at=created_at))
+        # Flushed before any PlanGoal is added: TrainingPlan/PlanGoal have a plain
+        # Column ForeignKey with no relationship(), so the unit-of-work flush order
+        # isn't topologically sorted the way it would be with a real relationship() —
+        # inserting both in one flush can emit the child before its parent commits.
+        session.flush()
+        for pid, user_id, goal_id, status, created_at in old_rows:
+            role = "primary" if plan_id_by_user[user_id] == pid else "supporting"
+            session.add(PlanGoal(id=f"plangoal_{uuid.uuid4().hex[:12]}", training_plan_id=plan_id_by_user[user_id],
+                                  goal_id=goal_id, role=role, created_at=created_at))
+        session.commit()
+        log.info(f"migrated {len(old_rows)} legacy single-goal TrainingPlan row(s) to the P21 PlanGoal model")
+    finally:
+        session.close()
 
 
 def _migrate_daily_steps_composite_pk():

@@ -1,13 +1,19 @@
 """P20 — goal-tied training plan view. Read-only over the periodization math the
-generator already does (see coach/generator.py's plan_week_view/project_week_series);
-creating a plan here changes nothing about what the nightly generator prescribes. P21 is
-where a started plan begins steering real generation."""
+generator already does (see coach/generator.py's plan_week_view/project_week_series).
+
+P21 (docs/P21_CONCURRENT_GOALS.md) redesigned the underlying model: ONE active
+TrainingPlan per user, not one per goal — goals attach via PlanGoal in a role
+("primary" | "supporting"). generator.resolve_periodization_goal() now reads the
+primary PlanGoal (when one exists) to decide what the nightly generator actually
+prescribes, so starting a plan and naming a primary goal is no longer purely
+cosmetic the way P20 shipped it."""
+import json
 import uuid
 from datetime import datetime, timezone
 
 from fastapi import APIRouter, HTTPException, Request, Depends
 
-from ..models import SessionLocal, Goal, TrainingPlan, DEFAULT_USER_ID
+from ..models import SessionLocal, Goal, TrainingPlan, PlanGoal, DEFAULT_USER_ID
 from ..accounts import auth
 from ..coach import generator
 from ..util import local_today
@@ -23,106 +29,173 @@ def _owns_goal(goal: Goal, user_id: str) -> bool:
     return goal.user_id == user_id or (goal.user_id is None and user_id == DEFAULT_USER_ID)
 
 
-def _plan_to_dict(p: TrainingPlan, goal: Goal, driving_goal_id: str | None) -> dict:
+def _get_active_plan(db, user_id) -> TrainingPlan | None:
+    return (db.query(TrainingPlan)
+            .filter(TrainingPlan.user_id == user_id, TrainingPlan.status == "active")
+            .first())
+
+
+def _plan_goal_dict(pg: PlanGoal, goal: Goal, driving_goal_id: str | None) -> dict:
     return {
-        "id": p.id, "goalId": p.goal_id,
-        "goalName": goal.name if goal else None,
+        "goalId": pg.goal_id, "goalName": goal.name if goal else None,
         "goalTargetDate": goal.target_date if goal else None,
-        "status": p.status, "createdAt": p.created_at,
-        # False here is not a bug and not a "disabled" state — it means this plan's goal
-        # is not what the generator is currently periodizing for, so the weeks below
-        # describe this goal's own arc rather than what's actually being prescribed. The
-        # UI says so out loud instead of implying a consistency that doesn't exist until P21.
-        "isActivePeriodizationGoal": driving_goal_id is not None and driving_goal_id == p.goal_id,
+        "role": pg.role,
+        # False here is not a bug and not a "disabled" state — see
+        # generator.resolve_periodization_goal: a supporting goal's own week series is a
+        # real, honest projection of what IT alone would prescribe, not what's actually
+        # being generated. Only the primary goal (while it's still a live active race)
+        # drives real generation.
+        "isActivePeriodizationGoal": driving_goal_id is not None and driving_goal_id == pg.goal_id,
     }
 
 
-def _driving_goal_id(db, user_id) -> str | None:
-    g = generator.nearest_active_race_goal(db, user_id, local_today(user_id))
-    return g.id if g else None
+def _plan_to_dict(db, p: TrainingPlan, user_id: str) -> dict:
+    driving = generator.resolve_periodization_goal(db, user_id, local_today(user_id))
+    driving_goal_id = driving.id if driving else None
+    plan_goals = db.query(PlanGoal).filter(PlanGoal.training_plan_id == p.id).all()
+    goals = [_plan_goal_dict(pg, db.get(Goal, pg.goal_id), driving_goal_id) for pg in plan_goals]
+    # Primary first, then soonest target date — same ordering intent as /api/goals.
+    goals.sort(key=lambda g: (g["role"] != "primary", g["goalTargetDate"] or "9999-12-31"))
+    return {
+        "id": p.id, "status": p.status, "createdAt": p.created_at,
+        "weeklyHoursCap": p.weekly_hours_cap,
+        "availableDays": _json_or_none(p.available_days_json),
+        "longRunDay": p.long_run_day,
+        "sleepConstraintMode": p.sleep_constraint_mode or "soft",
+        "goals": goals,
+    }
+
+
+def _json_or_none(raw):
+    if not raw:
+        return None
+    try:
+        return json.loads(raw)
+    except (TypeError, ValueError):
+        return None
 
 
 @router.get("/api/plans")
 def get_plans(user_id: str = Depends(auth.current_user_id)):
+    """Returns the user's single active plan, or null — P21 replaced the old
+    one-plan-per-goal list with one intertwined plan (docs/P21_CONCURRENT_GOALS.md)."""
     db = SessionLocal()
     try:
-        driving = _driving_goal_id(db, user_id)
-        plans = (db.query(TrainingPlan)
-                 .filter(TrainingPlan.user_id == user_id, TrainingPlan.status == "active")
-                 .all())
-        out = [_plan_to_dict(p, db.get(Goal, p.goal_id), driving) for p in plans]
-        # Soonest race first — same ordering intent as /api/goals, and it puts the goal
-        # you're actually training toward at the top when there's more than one plan.
-        out.sort(key=lambda d: d["goalTargetDate"] or "9999-12-31")
-        return out
+        plan = _get_active_plan(db, user_id)
+        return _plan_to_dict(db, plan, user_id) if plan else None
     finally:
         db.close()
 
 
 @router.post("/api/plans")
-async def create_plan(request: Request, user_id: str = Depends(auth.current_user_id)):
+async def add_plan_goal(request: Request, user_id: str = Depends(auth.current_user_id)):
+    """Attaches a goal to the user's single active plan (creating that plan on first
+    call) in the given role — "primary" by default for the first goal attached,
+    "supporting" thereafter, overridable explicitly in the body.
+
+    Idempotent re-attachment of the same goal updates its role rather than erroring, so
+    "Start a Plan" stays safely re-clickable. Setting a new "primary" demotes any
+    existing primary to "supporting" — exactly one primary per plan
+    (docs/P21_CONCURRENT_GOALS.md §3), reassigned explicitly rather than silently
+    allowing two."""
     body = await request.json()
     goal_id = body.get("goalId")
     if not goal_id:
         raise HTTPException(400, "goalId is required")
+    role = body.get("role")
+    if role not in (None, "primary", "supporting"):
+        raise HTTPException(400, 'role must be "primary" or "supporting"')
+
     db = SessionLocal()
     try:
         goal = db.get(Goal, goal_id)
         if not goal or not _owns_goal(goal, user_id):
             raise HTTPException(404, "Goal not found")
         if goal.goal_type != "race":
-            raise HTTPException(400, "Only race goals can have a training plan — phase/deload/ramp "
+            raise HTTPException(400, "Only race goals can join a training plan — phase/deload/ramp "
                                      "math is defined in weeks-until-race-date and has no analog for "
                                      "consistency or distance_target goals.")
         if goal.status != "active":
             raise HTTPException(400, "Goal is not active")
 
-        # Idempotent: "Start a Plan" has to be safely re-clickable (double-tap, stale UI,
-        # retried request) without erroring or creating a second plan for the same goal.
-        existing = (db.query(TrainingPlan)
-                    .filter(TrainingPlan.user_id == user_id, TrainingPlan.goal_id == goal_id)
-                    .first())
-        if existing:
-            if existing.status != "active":
-                existing.status = "active"
-                db.commit()
-            return _plan_to_dict(existing, goal, _driving_goal_id(db, user_id))
+        plan = _get_active_plan(db, user_id)
+        if not plan:
+            plan = TrainingPlan(id=f"plan_{uuid.uuid4().hex[:12]}", user_id=user_id, status="active",
+                                 created_at=datetime.now(timezone.utc).isoformat())
+            db.add(plan)
+            db.flush()
 
-        p = TrainingPlan(
-            id=f"plan_{uuid.uuid4().hex[:12]}", user_id=user_id, goal_id=goal_id,
-            status="active", created_at=datetime.now(timezone.utc).isoformat(),
-        )
-        db.add(p)
+        existing = (db.query(PlanGoal)
+                    .filter(PlanGoal.training_plan_id == plan.id, PlanGoal.goal_id == goal_id)
+                    .first())
+        if role is None:
+            # No explicit role: an already-attached goal keeps its current role (a plain
+            # idempotent re-click must never silently demote an existing primary just
+            # because other goals are also attached — real bug, caught while testing
+            # this route: re-POSTing the same already-primary goal with no role body
+            # was flipping it to "supporting" because the old logic keyed off "are any
+            # OTHER goals attached" instead of "is THIS goal already primary"). A new
+            # attachment defaults to primary only when the plan has no primary yet.
+            if existing:
+                role = existing.role
+            else:
+                has_primary = any(pg.role == "primary" for pg in
+                                   db.query(PlanGoal).filter(PlanGoal.training_plan_id == plan.id).all())
+                role = "supporting" if has_primary else "primary"
+
+        if role == "primary" and not (existing and existing.role == "primary"):
+            for pg in db.query(PlanGoal).filter(PlanGoal.training_plan_id == plan.id,
+                                                 PlanGoal.role == "primary").all():
+                pg.role = "supporting"
+
+        if existing:
+            existing.role = role
+        else:
+            db.add(PlanGoal(id=f"plangoal_{uuid.uuid4().hex[:12]}", training_plan_id=plan.id,
+                             goal_id=goal_id, role=role,
+                             created_at=datetime.now(timezone.utc).isoformat()))
         db.commit()
-        return _plan_to_dict(p, goal, _driving_goal_id(db, user_id))
+        return _plan_to_dict(db, plan, user_id)
     finally:
         db.close()
 
 
 @router.get("/api/plans/{plan_id}/weeks")
-def get_plan_weeks(plan_id: str, weeksBack: int = 8, weeksForward: int = 12,
+def get_plan_weeks(plan_id: str, goalId: str, weeksBack: int = 8, weeksForward: int = 12,
                    user_id: str = Depends(auth.current_user_id)):
+    """Per-goal week series within the user's plan — `goalId` is required because P21's
+    plan can serve several goals at once, each with its own phase/target (see
+    generator.plan_week_view's attribution rule)."""
     db = SessionLocal()
     try:
         p = db.get(TrainingPlan, plan_id)
         if not p or p.user_id != user_id:
             raise HTTPException(404, "Plan not found")
-        goal = db.get(Goal, p.goal_id)
+        plan_goal = (db.query(PlanGoal)
+                     .filter(PlanGoal.training_plan_id == plan_id, PlanGoal.goal_id == goalId)
+                     .first())
+        if not plan_goal:
+            raise HTTPException(404, "That goal is not attached to this plan")
+        goal = db.get(Goal, goalId)
         if not goal:
-            raise HTTPException(404, "Plan's goal no longer exists")
-        payload = _plan_to_dict(p, goal, _driving_goal_id(db, user_id))
+            raise HTTPException(404, "Goal no longer exists")
+
+        driving = generator.resolve_periodization_goal(db, user_id, local_today(user_id))
+        payload = {
+            "planId": p.id, "goalId": goal.id, "goalName": goal.name,
+            "goalTargetDate": goal.target_date, "role": plan_goal.role,
+            "isActivePeriodizationGoal": bool(driving and driving.id == goal.id),
+        }
         # Calendar-week volume resets to 0.0 every Monday morning, which is accurate and
-        # useless as a progress signal — on a Monday the panel reads "0.0 of 25.0" while
-        # the athlete has in fact run 24 miles in the past seven days. The rolling figure
-        # is what answers "where am I actually at right now"; the calendar one still
-        # drives the ramp, so both are reported rather than one replacing the other.
+        # useless as a progress signal — the rolling 7-day figure is reported alongside
+        # the calendar-week target rather than replacing it (see TrainingPlanSection.tsx).
         payload["last7DaysMi"] = round(
             generator.rolling_window_mileage(
                 db, user_id, generator.plan_activity_type(goal), days=7), 1)
         # Bounds are enforced inside project_week_series, not here — one place, so a
         # future caller can't route around them.
         payload["weeks"] = generator.project_week_series(
-            db, user_id, p, weeks_back=weeksBack, weeks_forward=weeksForward)
+            db, user_id, p, goal, weeks_back=weeksBack, weeks_forward=weeksForward)
         return payload
     finally:
         db.close()

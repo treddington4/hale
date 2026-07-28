@@ -33,7 +33,7 @@ from sqlalchemy import or_
 
 from ..models import (
     SessionLocal, Workout, Goal, User, UserTrainingConfig, HealthNote,
-    WeeklyPlan, RecoverySession, DEFAULT_USER_ID, owned_by,
+    WeeklyPlan, RecoverySession, TrainingPlan, PlanGoal, DEFAULT_USER_ID, owned_by,
 )
 from .. import stats
 from . import core as coach
@@ -202,6 +202,31 @@ def nearest_active_race_goal(db, user_id, date) -> Goal | None:
         .order_by(Goal.target_date)
         .first()
     )
+
+
+def resolve_periodization_goal(db, user_id, date) -> Goal | None:
+    """P21 — which goal actually drives the generator's real prescriptions. An active
+    TrainingPlan's "primary" PlanGoal wins once one exists: starting a plan and naming a
+    primary goal is the explicit "this is what I'm training for" signal the plan builder
+    exists to give the user, per docs/P21_CONCURRENT_GOALS.md §3.1 ("the primary goal owns
+    periodization"). Falls back to nearest_active_race_goal (P20 and earlier's implicit
+    behavior — nearest upcoming race wins) whenever no plan has been started, or the
+    started plan has no primary goal, or that goal is no longer a live active race — so a
+    user who never touches the Workouts-tab plan builder sees zero behavior change, and a
+    stale/completed primary goal can never orphan periodization instead of degrading."""
+    plan = (db.query(TrainingPlan)
+            .filter(TrainingPlan.user_id == user_id, TrainingPlan.status == "active")
+            .first())
+    if plan:
+        primary = (db.query(PlanGoal)
+                   .filter(PlanGoal.training_plan_id == plan.id, PlanGoal.role == "primary")
+                   .first())
+        if primary:
+            goal = db.get(Goal, primary.goal_id)
+            if (goal and goal.goal_type == "race" and goal.status == "active"
+                    and goal.target_date >= date.isoformat() and goal.periodizes_training is not False):
+                return goal
+    return nearest_active_race_goal(db, user_id, date)
 
 
 def _phase_for_date(db, user_id, date, goal: Goal | None = None) -> str:
@@ -527,30 +552,33 @@ def plan_activity_type(goal) -> str:
     return types[0] if types else "Run"
 
 
-def plan_week_view(db, user_id, plan, week_start, config=None, weekly_map=None) -> dict:
-    """One already-started or in-progress week for one TrainingPlan.
+def plan_week_view(db, user_id, plan, goal, week_start, config=None, weekly_map=None) -> dict:
+    """One already-started or in-progress week for one (TrainingPlan, goal) pair — P21's
+    plan can serve several goals at once (docs/P21_CONCURRENT_GOALS.md §3), so `goal` is
+    passed explicitly rather than read off a single `plan.goal_id` the way P20 shipped it;
+    the route layer calls this once per PlanGoal attached to the plan.
 
     Reads the persisted WeeklyPlan row only when BOTH hold:
 
-    1. This plan's goal is genuinely the one driving periodization that week. WeeklyPlan
-       is a single global stream per user (not goal-scoped) whose target/deload/frozen
-       belong to whatever goal won `nearest_active_race_goal` at the time, so a plan for
-       a non-driving goal that read those rows would display another goal's numbers as
-       its own, silently — worse than showing nothing.
-    2. This plan's discipline is running. WeeklyPlan is Run-only by construction
+    1. This goal is genuinely the one driving periodization that week — real-time
+       resolution via resolve_periodization_goal (P21), not just "nearest race" (P20).
+       WeeklyPlan is a single global stream per user (not goal-scoped) whose target/
+       deload/frozen belong to whatever goal is actually driving generation, so a goal
+       that isn't currently driving it would display another goal's numbers as its own,
+       silently — worse than showing nothing.
+    2. This goal's discipline is running. WeeklyPlan is Run-only by construction
        (_get_or_create_weekly_plan hardcodes "Run"); its target is a *running* budget,
-       so a cycling plan reading it would be the same category of lie as (1).
+       so a cycling goal reading it would be the same category of lie as (1).
 
-    Otherwise the week is replayed deterministically from this plan's own discipline."""
-    goal = db.get(Goal, plan.goal_id)
+    Otherwise the week is replayed deterministically from this goal's own discipline."""
     activity_type = plan_activity_type(goal)
     config = config or _get_training_config(db, user_id)
     phase = _phase_for_date(db, user_id, week_start, goal=goal)
     is_deload = _is_deload_week(config, week_start)
 
-    driving = nearest_active_race_goal(db, user_id, week_start)
+    driving = resolve_periodization_goal(db, user_id, week_start)
     persisted = None
-    if activity_type == "Run" and driving is not None and driving.id == plan.goal_id:
+    if activity_type == "Run" and driving is not None and driving.id == goal.id:
         persisted = (
             db.query(WeeklyPlan)
             .filter(WeeklyPlan.user_id == user_id, WeeklyPlan.week_start == week_start.isoformat())
@@ -575,8 +603,11 @@ def plan_week_view(db, user_id, plan, week_start, config=None, weekly_map=None) 
             "targetMi": target_mi, "isPersisted": persisted is not None}
 
 
-def project_week_series(db, user_id, plan, weeks_back=8, weeks_forward=12) -> list[dict]:
-    """Week-by-week target vs actual for one plan, spanning past and projected future.
+def project_week_series(db, user_id, plan, goal, weeks_back=8, weeks_forward=12) -> list[dict]:
+    """Week-by-week target vs actual for one (plan, goal) pair, spanning past and
+    projected future. `goal` is explicit for the same reason as plan_week_view's — one
+    P21 plan can serve several goals, so the route layer calls this once per attached
+    PlanGoal.
 
     Future weeks CANNOT be read from history: _compute_weekly_budget ramps off the last
     nonzero week's real mileage, and a week 6 out has none — asking for it would return
@@ -595,7 +626,6 @@ def project_week_series(db, user_id, plan, weeks_back=8, weeks_forward=12) -> li
     weeks_forward = max(0, min(weeks_forward, PLAN_VIEW_MAX_WEEKS_FORWARD))
     weeks_back = max(0, min(weeks_back, PLAN_VIEW_MAX_WEEKS_BACK))
 
-    goal = db.get(Goal, plan.goal_id)
     activity_type = plan_activity_type(goal)
     config = _get_training_config(db, user_id)
     current_week_start = _week_start(local_today(user_id))
@@ -612,7 +642,7 @@ def project_week_series(db, user_id, plan, weeks_back=8, weeks_forward=12) -> li
     while cursor <= end:
         is_future = cursor > current_week_start
         if not is_future:
-            wv = plan_week_view(db, user_id, plan, cursor, config, weekly_map=weekly_map)
+            wv = plan_week_view(db, user_id, plan, goal, cursor, config, weekly_map=weekly_map)
             phase, is_deload, frozen = wv["phase"], wv["isDeload"], wv["frozen"]
             target_mi, is_persisted = wv["targetMi"], wv["isPersisted"]
             # This plan's own discipline, not a hardcoded "Run" — a cycling goal's
@@ -640,6 +670,23 @@ def project_week_series(db, user_id, plan, weeks_back=8, weeks_forward=12) -> li
         })
         cursor += timedelta(weeks=1)
     return weeks
+
+
+def workout_duration_hours(workout) -> float | None:
+    """P21 — the one place a Workout's time cost is derived, for §3.3's essential-hours-
+    vs-weekly_hours_cap conflict check (docs/P21_CONCURRENT_GOALS.md §6 Q2/Q3). Prefers
+    the workout's own target_duration_sec; falls back to target_distance_mi ×
+    target_pace_sec_per_mi when only those are set. Deliberately NOT a flat distance ×
+    constant-pace shortcut — a workout's own prescribed pace is genuinely slower for a
+    long run than an easy run, and the distance itself grows toward peak, so reading the
+    real per-workout fields is what makes the hours estimate track that growth honestly
+    instead of underestimating a peak-block long run. Returns None (never 0) when neither
+    field is set, e.g. a strength session before target_duration_sec is populated."""
+    if workout.target_duration_sec:
+        return workout.target_duration_sec / 3600.0
+    if workout.target_distance_mi and workout.target_pace_sec_per_mi:
+        return (workout.target_distance_mi * workout.target_pace_sec_per_mi) / 3600.0
+    return None
 
 
 def _distribution_would_break(db, user_id, date, candidate_hard: bool) -> bool:
@@ -677,7 +724,7 @@ def _generate_endurance(db, user_id, date, readiness_result, config, activity_ty
     still subject to every real readiness/distribution gate below unchanged."""
     date_str = date.isoformat()
     week_start = _week_start(date)
-    phase = _phase_for_date(db, user_id, date)
+    phase = _phase_for_date(db, user_id, date, goal=resolve_periodization_goal(db, user_id, date))
     flags = readiness_result["flags"]
     severe_health = _has_severe_health_note(db, user_id)
 
@@ -887,6 +934,14 @@ STRENGTH_TEMPLATES = {
 # Weeks of trailing Run/Ride mileage checked before auto-picking runner_focus over
 # full_body_ab as the quick-generate default (see run_quick_generate) — a real
 # recent cardio habit, not just one lucky week.
+# P21 — a priori duration estimate for workout_duration_hours' §3.3 conflict check.
+# _generate_strength runs before a session happens, so unlike endurance (whose distance/
+# pace ARE the prescription) there's no real duration to read yet; a flat estimate is
+# honest here specifically because every template above has the same 5-exercise shape —
+# a per-template value would imply a precision none of them actually have. Real completed-
+# session TSS (P5) is what should count once a session is logged; this is a planning
+# input only, never allowed to overwrite that.
+STRENGTH_SESSION_DURATION_MIN = 45
 STRENGTH_AUTO_TARGET_LOOKBACK_WEEKS = 4
 STRENGTH_AUTO_TARGET_MIN_MILES = 8.0
 WEIGHT_INCREMENT_LB = {"squat": 10, "hinge": 10, "push": 5, "pull": 5, "core": 0}
@@ -985,6 +1040,7 @@ def _generate_strength(db, user_id, date, readiness_result, config, template_ove
     return _upsert_generator_workout(
         db, user_id, date.isoformat(), domain="strength", dry_run=dry_run,
         workout_type="strength", activity_type="Other", steps=steps, notes=notes,
+        target_duration_sec=STRENGTH_SESSION_DURATION_MIN * 60,
     )
 
 

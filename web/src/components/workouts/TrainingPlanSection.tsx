@@ -1,8 +1,8 @@
 import { useState } from "react"
-import type { TrainingPlan, PlanWeek } from "@/lib/api"
+import type { TrainingPlan, PlanGoalRef, PlanWeek } from "@/lib/api"
 import { useGoals } from "@/hooks/useGoals"
 import { useWorkouts } from "@/hooks/useWorkouts"
-import { usePlans, usePlanWeeks, useStartPlan } from "@/hooks/usePlans"
+import { usePlans, usePlanWeeks, useAddPlanGoal } from "@/hooks/usePlans"
 import { todayLocalDateString } from "@/lib/format"
 import { PlanWeekDays } from "@/components/workouts/PlanWeekDays"
 import { WeeklyPlanCard } from "@/components/workouts/WeeklyPlanCard"
@@ -19,10 +19,13 @@ const PHASE_BLURBS: Record<PlanWeek["phase"], string> = {
   taper: "Volume drops sharply so you arrive fresh",
 }
 
-function PlanGroup({ plan, defaultExpanded }: { plan: TrainingPlan; defaultExpanded: boolean }) {
+// P21 (docs/P21_CONCURRENT_GOALS.md): one plan, several goals possible, each in a role.
+// One collapsible section per attached goal — same visual shape P20 shipped per-plan,
+// now keyed by goal within the single plan.
+function GoalGroup({ plan, goalRef, defaultExpanded }: { plan: TrainingPlan; goalRef: PlanGoalRef; defaultExpanded: boolean }) {
   const [expanded, setExpanded] = useState(defaultExpanded)
   const [showAllWeeks, setShowAllWeeks] = useState(false)
-  const { data } = usePlanWeeks(plan.id, { weeksBack: 4, weeksForward: 8 })
+  const { data } = usePlanWeeks(plan.id, goalRef.goalId, { weeksBack: 4, weeksForward: 8 })
   const { data: workouts } = useWorkouts()
   const today = todayLocalDateString()
 
@@ -42,8 +45,8 @@ function PlanGroup({ plan, defaultExpanded }: { plan: TrainingPlan; defaultExpan
   )
   const hasEstimates = runWorkouts.some((w) => !w.targetDistanceMi && w.estimatedDistance)
 
-  const daysUntilRace = plan.goalTargetDate
-    ? Math.max(0, Math.round((new Date(plan.goalTargetDate + "T00:00:00").getTime() - new Date(today + "T00:00:00").getTime()) / 86_400_000))
+  const daysUntilRace = goalRef.goalTargetDate
+    ? Math.max(0, Math.round((new Date(goalRef.goalTargetDate + "T00:00:00").getTime() - new Date(today + "T00:00:00").getTime()) / 86_400_000))
     : null
 
   return (
@@ -54,7 +57,17 @@ function PlanGroup({ plan, defaultExpanded }: { plan: TrainingPlan; defaultExpan
       >
         <div className="flex items-center gap-2 text-sm font-medium">
           <span>{expanded ? "▼" : "▶"}</span>
-          <span>{plan.goalName}</span>
+          <span>{goalRef.goalName}</span>
+          <span
+            className={cn(
+              "rounded border px-1.5 py-0.5 text-[10px] font-normal capitalize",
+              goalRef.role === "primary"
+                ? "border-hale-hot/40 text-hale-hot"
+                : "border-border text-muted-foreground",
+            )}
+          >
+            {goalRef.role}
+          </span>
         </div>
         {daysUntilRace != null && (
           <span className="text-muted-foreground text-xs">
@@ -78,6 +91,16 @@ function PlanGroup({ plan, defaultExpanded }: { plan: TrainingPlan; defaultExpan
                   {current.isDeload && " · Deload"}
                 </div>
                 <div className="text-muted-foreground text-xs">{PHASE_BLURBS[current.phase]}</div>
+                {!goalRef.isActivePeriodizationGoal && (
+                  // A supporting goal — or a primary goal no longer live (completed/
+                  // expired) — isn't what the nightly generator is actually working
+                  // toward this week. Say so, rather than implying a consistency that
+                  // doesn't exist: this goal's own numbers are an honest replay of what
+                  // IT alone would prescribe, not what's really scheduled.
+                  <div className="text-hale-faint text-[11px]">
+                    Not currently driving real generation — showing this goal's own projection.
+                  </div>
+                )}
                 <div className="text-xs">
                   <span className="text-muted-foreground">This calendar week: </span>
                   <span className="tabular-nums">
@@ -154,16 +177,21 @@ function addDays(iso: string, n: number): string {
 
 export function TrainingPlanSection() {
   const { data: goals } = useGoals()
-  const { data: plans } = usePlans()
-  const startPlan = useStartPlan()
+  const { data: plan, isPending: planPending } = usePlans()
+  const addPlanGoal = useAddPlanGoal()
   const [dialogOpen, setDialogOpen] = useState(false)
 
-  if (!goals || !plans) return null
+  // planPending, not just `!plan` — plan is legitimately `null` once loaded with no
+  // active plan, but `undefined` while still loading. Without this, eligibleGoals below
+  // would briefly treat every already-attached goal as still eligible on first render,
+  // since attachedGoalIds reads plan?.goals before the query has resolved.
+  if (!goals || planPending) return null
 
-  const planGoalIds = new Set(plans.map((p) => p.goalId))
-  const eligibleGoals = goals.filter((g) => g.goalType === "race" && g.status === "active" && !planGoalIds.has(g.id))
+  const attachedGoalIds = new Set((plan?.goals ?? []).map((g) => g.goalId))
+  const eligibleGoals = goals.filter((g) => g.goalType === "race" && g.status === "active" && !attachedGoalIds.has(g.id))
+  const hasPrimary = (plan?.goals ?? []).some((g) => g.role === "primary")
 
-  if (plans.length === 0 && eligibleGoals.length === 0) {
+  if (!plan && eligibleGoals.length === 0) {
     return (
       <EmptyState
         icon={Target}
@@ -179,22 +207,23 @@ export function TrainingPlanSection() {
         <h2 className="text-sm font-semibold">Training Plan</h2>
         {eligibleGoals.length > 0 && (
           <Button variant="outline" size="sm" className="h-7" onClick={() => setDialogOpen(true)}>
-            Start a Plan
+            {plan ? "Add a Goal" : "Start a Plan"}
           </Button>
         )}
       </div>
 
-      {plans.map((p) => (
-        <PlanGroup key={p.id} plan={p} defaultExpanded={plans.length === 1} />
+      {plan?.goals.map((goalRef) => (
+        <GoalGroup key={goalRef.goalId} plan={plan} goalRef={goalRef} defaultExpanded={plan.goals.length === 1} />
       ))}
 
       <StartPlanDialog
         open={dialogOpen}
         onOpenChange={setDialogOpen}
         eligibleGoals={eligibleGoals}
-        starting={startPlan.isPending}
-        onStart={(goalId) => {
-          startPlan.mutate(goalId, { onSuccess: () => setDialogOpen(false) })
+        starting={addPlanGoal.isPending}
+        hasPrimary={hasPrimary}
+        onStart={(goalId, role) => {
+          addPlanGoal.mutate({ goalId, role }, { onSuccess: () => setDialogOpen(false) })
         }}
       />
     </div>
