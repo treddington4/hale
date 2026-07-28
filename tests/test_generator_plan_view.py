@@ -569,3 +569,95 @@ def test_rest_days_cost_nothing(db, user_id, today, plan_with_cap):
     _gen_workout(db, user_id, wk.isoformat(), workout_type="rest", target_duration_sec=9999)
     h = generator.weekly_hours_plan(db, user_id, wk, plan=plan)
     assert h["demandHours"] == 0.0 and h["unknownSessions"] == 0
+
+
+# ---------- standing down for a committed session ----------
+
+
+@pytest.fixture()
+def readiness_clean(db, user_id):
+    from app.stats import readiness
+    return readiness(db, user_id)
+
+
+def _other_planner_workout(db, user_id, date_iso, source, workout_type="interval", **kw):
+    from app.models import Workout
+    w = Workout(id=f"workout_{uuid.uuid4().hex[:12]}", user_id=user_id, scheduled_date=date_iso,
+                source=source, status="planned", workout_type=workout_type, activity_type="Run",
+                created_at="2026-01-01T00:00:00+00:00", **kw)
+    db.add(w)
+    db.commit()
+    return w
+
+
+def test_generator_stands_down_when_another_planner_committed_the_day(
+        db, user_id, today, training_config, readiness_clean):
+    """The real case: a run club hill workout (source="coach") already owned Tuesday, and
+    HALE added a generic easy run on top — an unintended double day, and the reason the
+    week's scheduled volume ran well past HALE's own budget."""
+    _other_planner_workout(db, user_id, today.isoformat(), "coach", target_duration_sec=4680)
+    result = generator._generate_endurance(db, user_id, today, readiness_clean, training_config)
+    assert result is None, "HALE must not add a session to a day another planner has committed"
+
+
+def test_a_garmin_rest_day_does_not_count_as_committed(db, user_id, today, training_config, readiness_clean):
+    """"Garmin suggests rest" is the absence of a session, not one — HALE should still be
+    free to prescribe."""
+    _other_planner_workout(db, user_id, today.isoformat(), "garmin", workout_type="rest")
+    result = generator._generate_endurance(db, user_id, today, readiness_clean, training_config)
+    assert result is not None
+
+
+def test_a_committed_strength_session_does_not_block_a_run(db, user_id, today, training_config, readiness_clean):
+    """Strength runs on its own track and doesn't occupy the same slot as a run."""
+    _other_planner_workout(db, user_id, today.isoformat(), "coach", workout_type="strength")
+    result = generator._generate_endurance(db, user_id, today, readiness_clean, training_config)
+    assert result is not None
+
+
+def test_quick_generate_still_produces_a_session(db, user_id, today, training_config, readiness_clean):
+    """ignore_schedule is an explicit "give me one now" press. It must never silently
+    decline just because another planner already has that day."""
+    _other_planner_workout(db, user_id, today.isoformat(), "garmin")
+    result = generator._generate_endurance(db, user_id, today, readiness_clean, training_config,
+                                           ignore_schedule=True)
+    assert result is not None
+
+
+def test_standing_down_withdraws_our_own_earlier_planned_row(
+        db, user_id, today, training_config, readiness_clean):
+    """Standing down while leaving yesterday's now-redundant HALE row in place would
+    defeat the point — the double day would still be sitting on the calendar."""
+    from app.models import Workout
+    first = generator._generate_endurance(db, user_id, today, readiness_clean, training_config)
+    assert first is not None
+    _other_planner_workout(db, user_id, today.isoformat(), "coach")
+
+    assert generator._generate_endurance(db, user_id, today, readiness_clean, training_config) is None
+    remaining = (db.query(Workout)
+                 .filter(Workout.scheduled_date == today.isoformat(),
+                         Workout.source == "generator", Workout.workout_type != "strength")
+                 .all())
+    assert remaining == [], "HALE's own superseded planned row should be withdrawn"
+
+
+def test_standing_down_never_touches_a_completed_row(db, user_id, today, training_config, readiness_clean):
+    """A completed session is history and must survive — same rule the upsert already
+    follows for non-planned rows."""
+    from app.models import Workout
+    generated = generator._generate_endurance(db, user_id, today, readiness_clean, training_config)
+    row = db.get(Workout, generated["id"])
+    row.status = "completed"
+    db.commit()
+    _other_planner_workout(db, user_id, today.isoformat(), "coach")
+
+    generator._generate_endurance(db, user_id, today, readiness_clean, training_config)
+    assert db.get(Workout, generated["id"]) is not None
+    assert db.get(Workout, generated["id"]).status == "completed"
+
+
+def test_distribution_audit_sees_a_same_day_hard_session(db, user_id, today):
+    """The blindness this fixes: the window stopped strictly before the candidate day, so
+    a hard session already scheduled for that very date was invisible to the audit."""
+    _other_planner_workout(db, user_id, today.isoformat(), "coach", workout_type="interval")
+    assert generator._distribution_would_break(db, user_id, today, candidate_hard=True) is True

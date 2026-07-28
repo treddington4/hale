@@ -849,19 +849,61 @@ def weekly_hours_plan(db, user_id, week_start, plan=None) -> dict | None:
     return result
 
 
+# Workout types that represent a real endurance session, as opposed to rest, strength or
+# a contentless cross-train placeholder. Used both for the distribution audit and for
+# deciding whether another planner has already committed this day.
+ENDURANCE_WORKOUT_TYPES = ("easy", "tempo", "interval", "long")
+
+
+def endurance_domain_for(activity_type: str) -> str:
+    """"endurance" stays the key for Run (the nightly auto-generator's only activity,
+    unchanged for backward compat with rows it already created); other activities get
+    their own suffixed key so a same-day Ride quick-generate can't silently overwrite an
+    already-generated Run, and vice versa."""
+    return "endurance" if activity_type == "Run" else f"endurance_{activity_type.lower()}"
+
+
+def committed_endurance_session(db, user_id, date):
+    """A real endurance session another planner has already put on this date — your run
+    club's hill workout (source="coach") or Garmin's adaptive session — or None.
+
+    Rest days don't count: "Garmin suggests rest" is the absence of a session, not one.
+    Strength doesn't count either; it's generated on its own track and doesn't occupy the
+    same slot as a run."""
+    return (
+        db.query(Workout)
+        .filter(Workout.scheduled_date == date.isoformat(),
+                Workout.source != GENERATOR_SOURCE,
+                Workout.workout_type.in_(ENDURANCE_WORKOUT_TYPES),
+                owned_by(Workout.user_id, user_id))
+        .order_by(Workout.created_at)
+        .first()
+    )
+
+
 def _distribution_would_break(db, user_id, date, candidate_hard: bool) -> bool:
     """Coarse day-type-ratio approximation of a real time-in-zone distribution audit
     (see module docstring). tempo/interval count as "hard"; everything else (incl.
-    long, which is hard on volume, not intensity) counts as "easy" for this ratio."""
+    long, which is hard on volume, not intensity) counts as "easy" for this ratio.
+
+    The window includes the candidate day itself, not just the days before it. It used to
+    stop strictly short of today, which made the audit blind to a hard session another
+    planner had already scheduled for the very day being judged — real case: a coach-
+    scheduled hill workout sat on the same Tuesday HALE was deciding about, and HALE
+    downgraded its own tempo on the basis of *previous* days while never seeing the hard
+    session already on that date. The generator's own row for the day is excluded, since
+    the candidate is counted separately below."""
     if not candidate_hard:
         return False
     week_start = date - timedelta(days=6)
     rows = (
         db.query(Workout)
-        .filter(Workout.scheduled_date >= week_start.isoformat(), Workout.scheduled_date < date.isoformat(),
-                Workout.workout_type.in_(("easy", "tempo", "interval", "long")), owned_by(Workout.user_id, user_id))
+        .filter(Workout.scheduled_date >= week_start.isoformat(), Workout.scheduled_date <= date.isoformat(),
+                Workout.workout_type.in_(ENDURANCE_WORKOUT_TYPES), owned_by(Workout.user_id, user_id))
         .all()
     )
+    rows = [w for w in rows
+            if not (w.scheduled_date == date.isoformat() and (w.source or "coach") == GENERATOR_SOURCE)]
     hard_count = sum(1 for w in rows if w.workout_type in ("tempo", "interval"))
     total = len(rows) + 1  # +1 for the candidate day itself
     ratio = (hard_count + 1) / total
@@ -892,6 +934,33 @@ def _generate_endurance(db, user_id, date, readiness_result, config, activity_ty
     # the weekly target stops being reachable (see _normalized_day_share's docstring).
     training_plan = _active_training_plan(db, user_id)
     skeleton = resolve_weekday_skeleton(training_plan)
+
+    # Stand down when another planner has already committed this day. Three planners
+    # write rows for the same date and the athlete does ONE of them, so HALE adding a
+    # generic session on top of a real committed one (a run club hill workout, a Garmin
+    # adaptive session) produced unintended double days and inflated the week's scheduled
+    # volume well past its own budget. Rest and strength don't block — see
+    # committed_endurance_session.
+    #
+    # `ignore_schedule` is Quick Generate: an explicit "give me one now" press must
+    # always produce a session, never silently decline. `dry_run` previews the same
+    # decision rather than showing a session that wouldn't actually be created.
+    if not ignore_schedule:
+        committed = committed_endurance_session(db, user_id, date)
+        if committed is not None:
+            if not dry_run:
+                # Withdraw our own earlier planned row for the day, if we made one before
+                # the other session appeared — standing down while leaving yesterday's
+                # redundant prescription sitting there would defeat the point. Only ever
+                # this module's own `planned` rows; a completed/skipped one is history.
+                existing = _existing_generator_workout(db, user_id, date_str, endurance_domain_for(activity_type))
+                if existing is not None and existing.status == "planned":
+                    db.delete(existing)
+                    db.commit()
+            log.info(f"generator: standing down for {date_str} — {committed.source} already has "
+                     f"a {committed.workout_type} session")
+            return None
+
     flags = readiness_result["flags"]
     severe_health = _has_severe_health_note(db, user_id)
 
@@ -985,11 +1054,7 @@ def _generate_endurance(db, user_id, date, readiness_result, config, activity_ty
     result_activity_type = "Other" if workout_type in ("rest", "cross_train") else activity_type
     notes = " ".join(trigger_notes) or None
 
-    # "endurance" stays the key for Run (the nightly auto-generator's only activity,
-    # unchanged for backward compat with rows it already created); other activities
-    # (currently just Ride, via quick-generate) get their own suffixed key so a same-day
-    # Ride quick-generate can't silently overwrite an already-generated Run, and vice versa.
-    endurance_domain = "endurance" if activity_type == "Run" else f"endurance_{activity_type.lower()}"
+    endurance_domain = endurance_domain_for(activity_type)
 
     result = _upsert_generator_workout(
         db, user_id, date_str, domain=endurance_domain, dry_run=dry_run,
