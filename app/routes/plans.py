@@ -81,13 +81,14 @@ def _plan_to_dict(db, p: TrainingPlan, user_id: str) -> dict:
     }
 
 
-# A Garmin adaptive-plan suggestion older than this is called out as possibly stale.
-# Garmin revises the same day's suggestion repeatedly — production's 2026-07-28 row was
-# revised on the 24th, 26th and 27th — so a copy more than a day old is genuinely likely
-# to disagree with what the Garmin app is showing right now. Confirmed the hard way:
-# HALE displayed a 76min session while the app said 55min, with nothing on screen to
-# suggest the number might not be current.
-GARMIN_PLAN_STALE_AFTER_HOURS = 24
+# A Garmin adaptive-plan copy older than this is called out as possibly stale.
+# Set from Garmin's observed revision cadence, not a round number: production's
+# 2026-07-28 session was revised on the 24th, 26th AND 27th, i.e. roughly daily, and the
+# 27th's revision changed *that same day's* session. A 24h window sits exactly at that
+# cadence and so missed the case that motivated this — the real copy was 22.8h old and
+# already disagreed with the app (76min stored vs 55min shown). Half a day is comfortably
+# inside the cadence.
+GARMIN_PLAN_STALE_AFTER_HOURS = 12
 
 
 def _garmin_plan_freshness(user_id: str) -> dict:
@@ -127,7 +128,10 @@ def _garmin_plan_freshness(user_id: str) -> dict:
         "lastCheckedAt": checked,
         "ageHours": round(age_hours, 1) if age_hours is not None else None,
         # Never checked at all counts as stale — "no data" must not read as "fresh".
-        "isStale": age_hours is None or age_hours > GARMIN_PLAN_STALE_AFTER_HOURS,
+        # An active cooldown also counts regardless of age: while locked out HALE cannot
+        # refresh even if it wanted to, so it genuinely cannot vouch for the number being
+        # current, and saying otherwise would be a claim it has no basis for.
+        "isStale": age_hours is None or age_hours > GARMIN_PLAN_STALE_AFTER_HOURS or in_cooldown,
         "inCooldown": in_cooldown,
         "cooldownUntil": cooldown if in_cooldown else None,
         "consecutiveFailures": int(failures) if failures and str(failures).isdigit() else 0,
