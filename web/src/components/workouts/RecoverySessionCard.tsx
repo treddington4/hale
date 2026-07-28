@@ -53,7 +53,16 @@ export function RecoverySessionCard({
               </Button>
             </>
           )}
-          <Button variant="link" size="sm" className="text-hale-hot h-auto p-0" onClick={onDelete}>
+          <Button
+            variant="link"
+            size="sm"
+            className="text-hale-hot h-auto p-0"
+            onClick={() => {
+              if (window.confirm("Delete this recovery session? This can't be undone.")) {
+                onDelete?.()
+              }
+            }}
+          >
             Delete
           </Button>
         </div>

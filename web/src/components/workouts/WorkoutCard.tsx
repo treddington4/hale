@@ -115,6 +115,49 @@ function WorkoutStepLine({ step }: { step: WorkoutStep }) {
   return <li>{line}</li>
 }
 
+// Garmin adaptive-plan revisions get prepended into `notes` as change-note lines
+// (see coach/core.py's sync_garmin_suggested_workouts), one per revision, newest
+// first — an unbounded wall of text after a few revisions. Split those out so only
+// the latest shows inline, with older ones collapsed behind <details>.
+const GARMIN_REVISION_PREFIX = "[Garmin revised this suggestion"
+
+function splitGarminRevisionNotes(notes: string) {
+  const lines = notes.split("\n")
+  const revisionLines = lines.filter((l) => l.startsWith(GARMIN_REVISION_PREFIX))
+  const otherLines = lines.filter((l) => !l.startsWith(GARMIN_REVISION_PREFIX))
+  return {
+    notesText: otherLines.join("\n").trim(),
+    latestRevision: revisionLines[0] ?? null,
+    olderRevisions: revisionLines.slice(1),
+  }
+}
+
+function NotesValue({ notes }: { notes: string }) {
+  const { notesText, latestRevision, olderRevisions } = splitGarminRevisionNotes(notes)
+  return (
+    <span className="font-normal whitespace-pre-line">
+      {notesText}
+      {latestRevision && (
+        <div className={notesText ? "mt-1" : undefined}>
+          {latestRevision}
+          {olderRevisions.length > 0 && (
+            <details className="mt-1">
+              <summary className="text-muted-foreground cursor-pointer text-xs">
+                {olderRevisions.length} earlier revision{olderRevisions.length === 1 ? "" : "s"}
+              </summary>
+              <div className="text-muted-foreground mt-1 space-y-1 text-xs">
+                {olderRevisions.map((r, i) => (
+                  <div key={i}>{r}</div>
+                ))}
+              </div>
+            </details>
+          )}
+        </div>
+      )}
+    </span>
+  )
+}
+
 function Row({ label, value }: { label: string; value: React.ReactNode }) {
   return (
     <div className="flex items-baseline justify-between gap-3 text-sm">
@@ -170,7 +213,7 @@ export function WorkoutCard({
         {!preview && <span style={{ color: WORKOUT_STATUS_COLORS[workout.status] }}>{workout.status}</span>}
       </div>
       {targetParts.length > 0 && <Row label="Target" value={targetParts.join(" · ")} />}
-      {workout.notes && <Row label="Notes" value={<span className="font-normal whitespace-pre-line">{workout.notes}</span>} />}
+      {workout.notes && <Row label="Notes" value={<NotesValue notes={workout.notes} />} />}
       {workout.steps && workout.steps.length > 0 && (
         <ol className="list-decimal space-y-1 pl-5 text-sm">
           {workout.steps.map((s, i) => (

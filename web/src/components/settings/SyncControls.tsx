@@ -42,6 +42,17 @@ function JobPanel({
       </div>
     )
   }
+  if (kind === "sync" && job.status === "done") {
+    return (
+      <div className="mt-2">
+        <div className="text-muted-foreground text-xs">
+          Synced {job.count} {job.count === 1 ? "activity" : "activities"}
+          {job.finishedAt && ` · ${new Date(job.finishedAt).toLocaleString()}`}
+        </div>
+        {job.log.length > 0 && <LogBlock lines={job.log} />}
+      </div>
+    )
+  }
   if (kind === "backlog" && "lastCompleted" in job && job.lastCompleted.syncedAt) {
     return (
       <div className="mt-2">
