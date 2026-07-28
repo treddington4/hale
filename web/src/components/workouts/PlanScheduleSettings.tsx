@@ -57,12 +57,21 @@ export function PlanScheduleSettings({ plan }: { plan: TrainingPlan }) {
   }
 
   const budget = plan.timeBudget.filter((d) => d.freeHours != null)
-  const weeklyTrainable = budget.reduce((s, d) => s + (d.capHours ?? 0), 0)
+  // Only days you've actually said you train count toward the weekly figure — otherwise
+  // it advertises capacity on days you've explicitly ruled out.
+  const isTrainingDay = (d: number) => (availableDays ? availableDays.includes(d) : true)
+  const weeklyTrainable = budget
+    .filter((d) => isTrainingDay(d.weekday))
+    .reduce((s, d) => s + (d.capHours ?? 0), 0)
   const longest = plan.hours?.longestSessionHours ?? null
   // The constraint that actually binds: a long session has to fit *some* day, and as a
   // marathon long run grows past a weekday's window only the weekend days remain.
-  const daysFittingLongest =
-    longest != null ? budget.filter((d) => (d.capHours ?? 0) >= longest).length : null
+  // Flagged as a problem only when a day genuinely can't hold it — the hot colour means
+  // "something is wrong" everywhere else in this app (over budget, frozen), so using it
+  // to mark days that DO fit turned a perfectly fine week into a wall of warnings.
+  const trainingDays = budget.filter((d) => isTrainingDay(d.weekday))
+  const daysTooShort =
+    longest != null ? trainingDays.filter((d) => (d.capHours ?? 0) < longest).length : null
 
   return (
     <div className="border-border rounded-lg border">
@@ -179,23 +188,25 @@ export function PlanScheduleSettings({ plan }: { plan: TrainingPlan }) {
                     </tr>
                   </thead>
                   <tbody className="text-muted-foreground">
-                    {budget.map((d) => (
-                      <tr key={d.weekday}>
-                        <td className="py-0.5 pr-2">{DAYS[d.weekday]}</td>
-                        <td className="py-0.5 pr-2">
-                          {d.wakeTime}–{d.bedTime}
-                        </td>
-                        <td className="py-0.5 pr-2 text-right">{d.freeHours?.toFixed(1)}h</td>
-                        <td
-                          className={cn(
-                            "py-0.5 text-right",
-                            longest != null && (d.capHours ?? 0) >= longest && "text-hale-hot",
-                          )}
-                        >
-                          {d.capHours?.toFixed(1)}h
-                        </td>
-                      </tr>
-                    ))}
+                    {budget.map((d) => {
+                      const training = isTrainingDay(d.weekday)
+                      const tooShort = training && longest != null && (d.capHours ?? 0) < longest
+                      return (
+                        <tr key={d.weekday} className={cn(!training && "text-hale-faint")}>
+                          <td className="py-0.5 pr-2">
+                            {DAYS[d.weekday]}
+                            {!training && <span className="ml-1 text-[10px]">rest</span>}
+                          </td>
+                          <td className="py-0.5 pr-2">
+                            {d.wakeTime}–{d.bedTime}
+                          </td>
+                          <td className="py-0.5 pr-2 text-right">{d.freeHours?.toFixed(1)}h</td>
+                          <td className={cn("py-0.5 text-right", tooShort && "text-hale-hot")}>
+                            {d.capHours?.toFixed(1)}h
+                          </td>
+                        </tr>
+                      )
+                    })}
                   </tbody>
                 </table>
               </div>
@@ -206,14 +217,23 @@ export function PlanScheduleSettings({ plan }: { plan: TrainingPlan }) {
                 free time also has to cover meals, family and winding down.
               </p>
               <p className="text-muted-foreground text-xs">
-                About {weeklyTrainable.toFixed(1)}h a week could go to training.
+                About {weeklyTrainable.toFixed(1)}h a week across your {trainingDays.length}{" "}
+                training days.
               </p>
-              {/* The genuinely binding constraint, and the reason this table exists. */}
-              {longest != null && daysFittingLongest != null && (
-                <p className={cn("text-xs", daysFittingLongest === 0 && "text-hale-hot")}>
-                  {daysFittingLongest === 0
-                    ? `This week's longest session (${longest.toFixed(1)}h) doesn't fit any day's window.`
-                    : `This week's longest session is ${longest.toFixed(1)}h — it fits ${daysFittingLongest} of your ${budget.length} days (highlighted).`}
+              {/* The genuinely binding constraint, and the reason this table exists: as a
+                  marathon long run grows it stops fitting a weekday window at all. */}
+              {longest != null && daysTooShort != null && (
+                <p
+                  className={cn(
+                    "text-xs",
+                    daysTooShort === trainingDays.length ? "text-hale-hot" : "text-muted-foreground",
+                  )}
+                >
+                  {daysTooShort === trainingDays.length
+                    ? `This week's longest session (${longest.toFixed(1)}h) is longer than any of your training days allow.`
+                    : daysTooShort > 0
+                      ? `This week's longest session is ${longest.toFixed(1)}h — too long for ${daysTooShort} of your ${trainingDays.length} training days (in orange).`
+                      : `This week's longest session is ${longest.toFixed(1)}h, which fits every training day.`}
                 </p>
               )}
             </div>
