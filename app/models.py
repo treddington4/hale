@@ -848,6 +848,7 @@ def init_db():
     _normalize_activity_types()
     _migrate_chat_messages_fts()
     _backfill_workout_target_hr()
+    _dedupe_garmin_workout_notes()
     _seed_default_user_and_credentials()
     _seed_marathon_goal()
     _seed_default_recovery_tool()
@@ -891,6 +892,46 @@ def _migrate_add_missing_columns():
                         "INTEGER" if isinstance(col.type, (Integer, Boolean)) else "REAL"
                     conn.exec_driver_sql(f"ALTER TABLE {table_name} ADD COLUMN {col.name} {col_type}")
         conn.commit()
+
+
+def _dedupe_garmin_workout_notes():
+    """One-time repair for notes bloated before coach.sync_garmin_suggested_workouts
+    stopped re-appending Garmin's own description on every revision. Garmin repeats
+    "Garmin adaptive plan: Base — 143bpm" verbatim each sync, and it used to be prepended
+    unconditionally — one real production row had five identical copies stacked above its
+    revision history.
+
+    Collapses repeated identical lines to their first occurrence, preserving order and
+    every distinct line (revision entries all differ by date, so none are lost).
+    Idempotent: a row already clean produces the same string and isn't rewritten."""
+    session = SessionLocal()
+    try:
+        rows = (session.query(Workout)
+                .filter(Workout.source == "garmin", Workout.notes.isnot(None))
+                .all())
+        n = 0
+        for w in rows:
+            lines = (w.notes or "").split("\n")
+            seen, kept = set(), []
+            for line in lines:
+                key = line.strip()
+                if key and key in seen:
+                    continue
+                if key:
+                    seen.add(key)
+                kept.append(line)
+            cleaned = "\n".join(kept)
+            if cleaned != w.notes:
+                w.notes = cleaned
+                n += 1
+        if n:
+            session.commit()
+            log.info(f"deduped repeated note lines on {n} Garmin workout(s)")
+    except Exception as e:
+        session.rollback()
+        log.warning(f"Garmin note dedupe skipped: {e}")
+    finally:
+        session.close()
 
 
 def _backfill_workout_target_hr():

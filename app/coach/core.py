@@ -767,6 +767,20 @@ def _default_activity_type(workout_type: str) -> str:
     return "Other" if workout_type in _NON_RUN_WORKOUT_TYPES else "Run"
 
 
+def _garmin_prescription_unchanged(existing: Workout, entry: dict) -> bool:
+    """Whether a Garmin entry describes the same session already stored, ignoring its
+    id. Compares what the athlete would actually do — type, distance, duration, HR
+    target — because that is what "revised" is supposed to mean. `garmin_workout_uuid`
+    on its own is not a content signal: Garmin hands out a new one for a reissued but
+    identical suggestion."""
+    return (
+        existing.workout_type == entry["workoutType"]
+        and existing.target_distance_mi == entry.get("targetDistanceMi")
+        and existing.target_duration_sec == entry.get("targetDurationSec")
+        and existing.target_hr_bpm == entry.get("targetHrBpm")
+    )
+
+
 def sync_garmin_suggested_workouts(db, entries: list, user_id: str = DEFAULT_USER_ID) -> int:
     """Upserts Garmin adaptive-training-plan suggestions as source="garmin" Workout rows,
     one per (scheduled_date, source) so these never collide with a Coach-scheduled
@@ -792,14 +806,33 @@ def sync_garmin_suggested_workouts(db, entries: list, user_id: str = DEFAULT_USE
             continue  # already completed/skipped — immutable, don't rewrite history
         if existing and existing.garmin_workout_uuid == e.get("garminWorkoutUuid"):
             continue  # unchanged since last sync
+        if existing and _garmin_prescription_unchanged(existing, e):
+            # Garmin reissues the same prescription under a fresh id, so a changed uuid
+            # alone does NOT mean the session changed. Recording a "revision" here logged
+            # a change that never happened — production accumulated notes like
+            # "revised on 07-27 — was: easy, 76min" immediately followed by
+            # "revised on 07-28 — was: easy, 76min", i.e. 76min revised to 76min. Store
+            # the new id so it isn't re-detected forever, and say nothing.
+            existing.garmin_workout_uuid = e.get("garminWorkoutUuid")
+            continue
         if existing:
             change_note = (
-                f"[Garmin revised this suggestion on {local_today(user_id).isoformat()} — was: "
+                f"[Revised {local_today(user_id).isoformat()} — was "
                 f"{existing.workout_type}"
                 f"{f', {existing.target_distance_mi}mi' if existing.target_distance_mi else ''}"
                 f"{f', {round(existing.target_duration_sec / 60)}min' if existing.target_duration_sec else ''}]"
             )
-            existing.notes = "\n".join(filter(None, [e.get("notes"), change_note, existing.notes]))
+            # Garmin repeats its own description verbatim on every sync ("Base — 143bpm"),
+            # and prepending it unconditionally stacked one identical copy per revision —
+            # five of them on a single production row. Only add it when it's genuinely
+            # not there already.
+            fresh = (e.get("notes") or "").strip()
+            prior = existing.notes or ""
+            parts = [fresh] if fresh and fresh not in prior else []
+            parts.append(change_note)
+            if prior:
+                parts.append(prior)
+            existing.notes = "\n".join(parts)
             existing.workout_type = e["workoutType"]
             existing.activity_type = e["activityType"]
             existing.target_distance_mi = e.get("targetDistanceMi")
