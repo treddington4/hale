@@ -91,16 +91,27 @@ def find_matching_garmin_run(db, hevy_run: Run, user_id: str) -> Run | None:
     window_dates = {
         (hevy_start.date() + timedelta(days=d)).strftime("%Y-%m-%d") for d in (-1, 0, 1)
     }
-    candidates = (
-        db.query(Run)
-        .filter(
-            Run.source == "garmin",
-            Run.activity_type == "strength_training",
-            Run.date.in_(window_dates),
-            owned_by(Run.user_id, user_id),
+    # Compare NORMALIZED types, never a literal source spelling. P4 made activity_type
+    # canonical-lowercase at write time, so Garmin's "strength_training" is stored as
+    # "strength" — this filter matched a literal that no longer exists in the table (0 of
+    # 27 real Garmin strength rows), and every Hevy workout silently found no Garmin
+    # match. Exactly the failure already pinned for _week_mileage, in a spot that had no
+    # test. Normalizing both sides also keeps legacy rows written before P4 matching.
+    from ..stats import _normalize_activity_type
+
+    strength = _normalize_activity_type("strength_training")
+    candidates = [
+        c for c in (
+            db.query(Run)
+            .filter(
+                Run.source == "garmin",
+                Run.date.in_(window_dates),
+                owned_by(Run.user_id, user_id),
+            )
+            .all()
         )
-        .all()
-    )
+        if _normalize_activity_type(c.activity_type) == strength and c.start_time
+    ]
     best, best_diff = None, None
     for cand in candidates:
         cand_start = datetime.strptime(f"{cand.date} {cand.start_time}", "%Y-%m-%d %H:%M")
