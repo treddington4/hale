@@ -40,6 +40,19 @@ def _enable_sqlite_fk(dbapi_connection, connection_record):
     demo deployment's empty volume), never the production data this app already has."""
     cursor = dbapi_connection.cursor()
     cursor.execute("PRAGMA foreign_keys=ON")
+    # WAL: readers no longer block the writer and vice versa. Default (rollback) journal
+    # mode takes an exclusive lock for the whole write transaction, and this app holds
+    # transactions open across slow Garmin network I/O — garmin_enrich's pass does a
+    # login plus a FIT upload before committing. A concurrent insert then has no chance:
+    # confirmed in production, where a Hevy auto-enrich pass failed with "database is
+    # locked" while trying to store a just-synced Garmin strength activity, leaving that
+    # day's workout un-enriched. Set per-connection but persisted in the file header, so
+    # it applies to the whole database once any connection sets it.
+    cursor.execute("PRAGMA journal_mode=WAL")
+    # Wait for a held lock instead of failing instantly. pysqlite defaults to 5s, which
+    # a Garmin login + upload can exceed; 30s comfortably covers it and only ever costs
+    # latency on genuine contention, never correctness.
+    cursor.execute("PRAGMA busy_timeout=30000")
     cursor.close()
 
 
