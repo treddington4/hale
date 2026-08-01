@@ -162,7 +162,7 @@ export function DashboardCards() {
         label="4-week training load"
         value={fmtPctChange(load.pctChange)}
         valueColor={loadColor}
-        breakdown={`${load.last28DaysMiles ?? "--"} mi vs ${load.prior28DaysMiles ?? "--"} mi prior`}
+        breakdown={`${load.last28DaysTSS ?? "--"} TSS vs ${load.prior28DaysTSS ?? "--"} TSS prior`}
         onClick={() => navigate("/insights")}
       />
       <ChartCard

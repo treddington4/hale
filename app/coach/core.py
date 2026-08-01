@@ -388,6 +388,24 @@ CHALLENGE_SAFETY_PROMPT = (
 )
 
 
+WORKOUT_MATH_GROUNDING_PROMPT = (
+    "WORKOUT MATH GROUNDING: HALE's own nightly generator (the same one that produces "
+    "auto-generated workouts) computes prescriptions from real phase/readiness/weekly-"
+    "budget math, not from scratch — get_suggested_workout exposes that exact "
+    "computation for any date/domain (run/ride/strength/recovery) without writing "
+    "anything. Before calling schedule_workout for a run/ride/strength/recovery-style "
+    "request, call get_suggested_workout for that date and domain first, and use its "
+    "distance/pace/duration/steps as your default — don't invent a prescription from "
+    "nothing. Deviate from it only when the user gave an explicit, concrete reason "
+    "(how much time they actually have, how they say they're feeling today, a specific "
+    "goal for this particular session) — and when you do deviate, say what changed and "
+    "why in schedule_workout's notes, rather than silently substituting your own "
+    "numbers. This doesn't apply to mobility/warmup/general circuit sessions with no "
+    "real distance-pace-duration prescription to ground — use your judgment there as "
+    "normal."
+)
+
+
 PRODUCT_FEEDBACK_PROMPT = (
     "Phase 12.5 — PRODUCT FEEDBACK ROUTING: not every message is a coaching question. "
     "If the user describes a bug in the app, asks for a new feature, or gives general "
@@ -467,7 +485,8 @@ ACCURACY_CHECKS_PROMPT = (
 def build_system_prompt(personality: str, sex: str | None = None) -> str:
     persona_text = PERSONA_PROMPTS.get(personality, PERSONA_PROMPTS["normal"])
     blocks = [BASE_PROMPT, persona_text, SAFETY_OVERRIDE_PROMPT, RECOVERY_GUIDANCE_PROMPT,
-              CHALLENGE_SAFETY_PROMPT, PRODUCT_FEEDBACK_PROMPT, ACCURACY_CHECKS_PROMPT]
+              CHALLENGE_SAFETY_PROMPT, WORKOUT_MATH_GROUNDING_PROMPT, PRODUCT_FEEDBACK_PROMPT,
+              ACCURACY_CHECKS_PROMPT]
     if sex == "female":
         blocks.append(WOMENS_STRENGTH_PROMPT)
     return "\n\n".join(blocks)

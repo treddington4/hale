@@ -31,6 +31,7 @@ from claude_agent_sdk import (
 )
 
 from . import core as coach
+from . import generator
 from .. import stats
 from ..models import SessionLocal, ChatMessage, User, DEFAULT_USER_ID
 
@@ -46,7 +47,7 @@ _TOOL_NAMES = [
     "get_run_summary", "get_weekly_mileage", "get_monthly_mileage", "get_personal_records",
     "get_pace_trend", "get_training_load_trend", "get_readiness", "get_daily_steps", "query_runs", "get_run_detail",
     "get_health_history", "find_related_health_history", "log_health_note", "update_health_status",
-    "get_scheduled_workouts", "schedule_workout", "update_workout", "record_workout_completion",
+    "get_scheduled_workouts", "get_suggested_workout", "schedule_workout", "update_workout", "record_workout_completion",
     "get_exercise_progress", "log_product_feedback",
     "render_chart", "get_goals",
     "get_recovery_tools", "recommend_recovery_session", "get_recovery_sessions",
@@ -131,7 +132,7 @@ def _build_tools(user_id: str, is_test: bool = False) -> list:
         result = _db_call(stats.training_load_trend, user_id=user_id)
         return {"content": [{"type": "text", "text": json.dumps(result)}]}
 
-    @tool("get_readiness", "Today's (or a given date's) readiness signal — HRV/resting-HR vs 7-day baseline, sleep score, 7d/28d acute:chronic mileage ratio, days since a hard run, and named flags (hrv_below_baseline/rhr_spike/sleep_deficit). This is what the workout generator's readiness gate uses — check it before suggesting anything more intense than easy if the user hasn't mentioned how they're feeling.", {
+    @tool("get_readiness", "Today's (or a given date's) readiness signal — HRV/resting-HR vs 7-day baseline, sleep score, acute:chronic training-load ratio (ATL/CTL), days since a hard run, and named flags (hrv_below_baseline/rhr_spike/sleep_deficit). This is what the workout generator's readiness gate uses — check it before suggesting anything more intense than easy if the user hasn't mentioned how they're feeling.", {
         "type": "object", "properties": {
             "date": {"type": "string", "description": "YYYY-MM-DD, defaults to today"},
         },
@@ -277,6 +278,22 @@ def _build_tools(user_id: str, is_test: bool = False) -> list:
         result = _db_call(coach.list_workouts, args.get("startDate"), args.get("endDate"), args.get("status"), user_id=user_id)
         return {"content": [{"type": "text", "text": json.dumps(result)}]}
 
+    @tool("get_suggested_workout", "Compute the real math-driven prescription HALE's own generator would produce for a date/domain — the SAME phase/readiness/weekly-budget logic that runs the nightly auto-generated workouts, not a fresh guess. Call this BEFORE schedule_workout for any run/ride/strength/recovery-style request and use its numbers as your default starting point; only deviate when the user gave an explicit reason (time available, how they feel, a specific session goal), and say so in schedule_workout's notes when you do. Read-only — computes but does not write anything.", {
+        "type": "object",
+        "properties": {
+            "domain": {"type": "string", "enum": list(generator.QUICK_GENERATE_DOMAINS), "description": "'run', 'ride', 'strength', or 'recovery'"},
+            "date": {"type": "string", "description": "YYYY-MM-DD, defaults to today"},
+        },
+        "required": ["domain"],
+    })
+    async def get_suggested_workout(args):
+        try:
+            result = _db_call(generator.run_quick_generate, user_id=user_id,
+                               domain=args["domain"], date=args.get("date"), dry_run=True)
+        except ValueError as e:
+            return {"content": [{"type": "text", "text": str(e)}], "is_error": True}
+        return {"content": [{"type": "text", "text": json.dumps(result)}]}
+
     @tool("get_exercise_progress", "Current progression state for a strength exercise (current weight/reps target/hold duration, last completed) — or sensible fresh-start defaults if it's never been prescribed before. Read-only: this is derived state the generator's double-progression rule owns; check it before proposing a challenge/ramp involving this exercise so you know whether it's already progressing.", {
         "type": "object",
         "properties": {"exercise": {"type": "string", "description": "e.g. 'Push-up', 'Plank'"}},
@@ -343,7 +360,7 @@ def _build_tools(user_id: str, is_test: bool = False) -> list:
         },
     }
 
-    @tool("schedule_workout", "Prescribe a workout for a specific date. Check get_health_history first — a workout suggestion must be modified (rest/lower intensity/avoid the affected area) if anything active would be affected, not just persona-toned around the same plan.", {
+    @tool("schedule_workout", "Prescribe a workout for a specific date. For a run/ride/strength/recovery-style session, call get_suggested_workout first and anchor your prescription in its numbers — see the WORKOUT MATH GROUNDING rule in your instructions. Check get_health_history first — a workout suggestion must be modified (rest/lower intensity/avoid the affected area) if anything active would be affected, not just persona-toned around the same plan.", {
         "type": "object",
         "properties": {
             "scheduledDate": {"type": "string", "description": "YYYY-MM-DD"},
@@ -544,7 +561,7 @@ def _build_tools(user_id: str, is_test: bool = False) -> list:
         get_run_summary, get_weekly_mileage, get_monthly_mileage, get_personal_records,
         get_pace_trend, get_training_load_trend, get_readiness, get_daily_steps, query_runs, get_run_detail,
         get_health_history, find_related_health_history, log_health_note, update_health_status,
-        get_scheduled_workouts, schedule_workout, update_workout, record_workout_completion,
+        get_scheduled_workouts, get_suggested_workout, schedule_workout, update_workout, record_workout_completion,
         get_exercise_progress, log_product_feedback,
         render_chart, get_goals,
         get_recovery_tools, recommend_recovery_session, get_recovery_sessions,

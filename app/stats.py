@@ -19,7 +19,7 @@ from statistics import median
 from sqlalchemy import func
 
 from .models import (
-    Activity, Run, DailySteps, Goal, Gear, UserTrainingConfig, DEFAULT_USER_ID, owned_by,
+    Activity, Run, DailySteps, DailyMetrics, Goal, Gear, UserTrainingConfig, DEFAULT_USER_ID, owned_by,
     SessionLocal, get_sync_meta, set_sync_meta, user_key,
 )
 from .util import local_today, user_timezone, compute_tss, compute_efficiency_factor
@@ -391,7 +391,13 @@ def readiness(db, user_id: str = DEFAULT_USER_ID, date=None) -> dict:
     `get_readiness` chat tool. Reads DailySteps' HRV/resting-HR/sleep columns
     (garmin_sync._sync_daily_wellness) plus real Run history — no invented composite
     "readiness score", just real numbers and named flags, same "don't fabricate a
-    judgment" principle as goal_progress()."""
+    judgment" principle as goal_progress().
+
+    acuteChronicRatio (PLAN.md's previously-deferred follow-up) is the standard EWMA
+    acute:chronic ratio — ATL/CTL from the PMC pipeline's DailyMetrics (app/pipeline.py)
+    — not a raw 7d/28d rolling-mileage average. It's informational only here (never
+    added to `flags`), so this swap changes the reported number's accuracy without
+    changing any generator gating behavior."""
     target = date or local_today(user_id)
     if isinstance(target, str):
         target = datetime.strptime(target, "%Y-%m-%d").date()
@@ -447,13 +453,23 @@ def readiness(db, user_id: str = DEFAULT_USER_ID, date=None) -> dict:
         flags.append("garmin_readiness_low")
 
     runs = _all_runs(db, "Run", user_id)
-    last7_start = (target - timedelta(days=6)).isoformat()
-    prior28_start = (target - timedelta(days=27)).isoformat()
     target_str = target.isoformat()
-    last7 = sum(r.distance_mi or 0 for r in runs if r.date and last7_start <= r.date <= target_str)
-    trailing28 = sum(r.distance_mi or 0 for r in runs if r.date and prior28_start <= r.date <= target_str)
-    weekly_avg_28 = trailing28 / 4
-    acute_chronic_ratio = round(last7 / weekly_avg_28, 2) if weekly_avg_28 > 0 else None
+
+    # Most recent DailyMetrics row at or before `target` — same "yesterday's ctl/atl"
+    # convention TSB already uses (app/pipeline.py), so a same-day chat/generator call
+    # reads the prior night's pipeline output rather than needing today's to exist yet.
+    # None (not a silent fallback to the old mileage formula) when the PMC pipeline
+    # hasn't run for this user yet — matches this function's "don't fabricate" rule.
+    latest_metrics = (
+        db.query(DailyMetrics)
+        .filter(DailyMetrics.date <= target_str, owned_by(DailyMetrics.user_id, user_id))
+        .order_by(DailyMetrics.date.desc())
+        .first()
+    )
+    acute_chronic_ratio = (
+        round(latest_metrics.atl / latest_metrics.ctl, 2)
+        if latest_metrics and latest_metrics.ctl > 0 else None
+    )
 
     hard_dates = sorted(
         (r.date for r in runs if r.date and r.date <= target_str and r.suggested_type in _HARD_RUN_TYPES),

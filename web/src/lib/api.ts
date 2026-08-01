@@ -27,8 +27,8 @@ export interface MonthMileage {
 }
 
 export interface TrainingLoad {
-  last28DaysMiles: number
-  prior28DaysMiles: number
+  last28DaysTSS: number
+  prior28DaysTSS: number
   pctChange: number | null
   direction: "up" | "down" | "steady"
 }

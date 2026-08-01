@@ -15,9 +15,13 @@ per-source-per-date upsert.
 
 Known v1 approximations, called out explicitly rather than silently:
 - `WeeklyPlan.target_tss`/`actual_tss` store a mileage-based proxy, not a real
-  Training Stress Score (Phase 6.1's per-activity TSS hasn't shipped yet) — same
-  "real number now, real thing later" tradeoff stats.readiness()'s acuteChronicRatio
-  already makes.
+  Training Stress Score. stats.readiness()'s acuteChronicRatio made the same "real
+  number now, real thing later" tradeoff, but has since been switched to the real
+  ATL/CTL ratio now that the PMC pipeline (app/pipeline.py) exists — target_tss is
+  the one proxy left, and stays one deliberately (see plan_week_view/project_week_series
+  and DAY_SHARE, both miles-denominated end to end — migrating the budget's own
+  currency to TSS is a much larger, separate project than surfacing a real number
+  alongside it).
 - The distribution audit approximates "time-in-zone" with a coarse hard/easy day-type
   ratio (tempo/interval count as hard) over the trailing 7 days, not true per-second
   HR-zone time (this app doesn't store zone-time breakdowns at sync time).
@@ -170,6 +174,16 @@ RETURNING_ATHLETE_FRACTION = 0.60
 # real easy run and a ~12-minute bike ride. Only disciplines listed here get a floor;
 # an unlisted one keeps the pure computed value rather than inheriting a wrong default.
 MIN_SESSION_MILES = {"Ride": 8.0}
+
+# Absolute ceiling on a single long-run session, independent of DAY_SHARE's percentage-
+# of-weekly-budget share (0.30) — without this, the long run grows unbounded as weekly
+# volume ramps through build/peak, since DAY_SHARE only bounds it relative to that
+# week's own (also-growing) total, never in absolute terms. Running-specific, same
+# "primarily a running app" scope as MIN_SESSION_MILES above — a conservative default
+# most runners won't hit; UserTrainingConfig.long_run_cap_mi overrides it for someone
+# who's actually trained beyond it.
+DEFAULT_LONG_RUN_CAP_MI = 20.0
+
 _EPOCH_MONDAY = datetime(2020, 1, 6).date()  # any fixed Monday — used only to derive a stable week index
 
 # 1-flag readiness downgrade ladder: interval -> tempo -> easy (stands in for "Z2",
@@ -267,6 +281,15 @@ def _is_deload_week(config, week_start) -> bool:
     return weeks_since_epoch % cycle_len == cycle_len - 1
 
 
+def _mesocycle_position(config, week_start) -> tuple[int, int]:
+    """1-indexed (position, cycle_len) — "week 2 of 3 (build)" — sharing the exact same
+    epoch-anchored math _is_deload_week already uses, just exposed as a display value
+    instead of only a boolean, for the always-on generator rationale below."""
+    cycle_len = MESOCYCLE_LENGTHS.get(config.mesocycle_pattern, 4)
+    weeks_since_epoch = (week_start - _EPOCH_MONDAY).days // 7
+    return (weeks_since_epoch % cycle_len) + 1, cycle_len
+
+
 def _week_mileage(db, user_id, week_start, activity_type="Run") -> float:
     """Two real, shipped bugs lived here, found back to back while building P20's plan
     view — surfaced one at a time because the first one was masking the second.
@@ -292,6 +315,19 @@ def _week_mileage(db, user_id, week_start, activity_type="Run") -> float:
     week_end = week_start + timedelta(days=6)
     return sum(
         r.distance_mi or 0 for r in stats._all_runs(db, activity_type, user_id)
+        if week_start.isoformat() <= r.date <= week_end.isoformat()
+    )
+
+
+def _week_tss(db, user_id, week_start, activity_type="Run") -> float:
+    """Real per-run TSS (Activity.tss, computed at sync time) for one calendar week —
+    the honest number plan_week_view surfaces alongside its mileage-based targetMi,
+    without changing what currency that target is itself computed in (see WeeklyPlan's
+    own docstring for why a full migration is out of scope). Mirrors _week_mileage's
+    dedup-safe stats._all_runs routing, just summing tss instead of distance_mi."""
+    week_end = week_start + timedelta(days=6)
+    return sum(
+        (r.tss or 0) for r in stats._all_runs(db, activity_type, user_id)
         if week_start.isoformat() <= r.date <= week_end.isoformat()
     )
 
@@ -670,8 +706,9 @@ def plan_week_view(db, user_id, plan, goal, week_start, config=None, weekly_map=
             last_nonzero, is_cold_start, config.weekly_ramp_pct or 3.0, phase, is_deload, weeks_active), 1)
         frozen = False
 
+    actual_tss = round(_week_tss(db, user_id, week_start, activity_type), 1)
     return {"phase": phase, "isDeload": is_deload, "frozen": frozen, "activityType": activity_type,
-            "targetMi": target_mi, "isPersisted": persisted is not None}
+            "targetMi": target_mi, "isPersisted": persisted is not None, "actualTss": actual_tss}
 
 
 def project_week_series(db, user_id, plan, goal, weeks_back=8, weeks_forward=12) -> list[dict]:
@@ -720,6 +757,7 @@ def project_week_series(db, user_id, plan, goal, weeks_back=8, weeks_forward=12)
             # "actual" must be cycling miles. float() so a zero-mileage week serializes
             # as 0.0, not 0 — a type that flips with the data is a nuisance downstream.
             actual_mi = float(round(weekly_map.get(cursor, 0.0), 1))
+            actual_tss = wv["actualTss"]
         else:
             phase = _phase_for_date(db, user_id, cursor, goal=goal)
             is_deload = _is_deload_week(config, cursor)
@@ -730,11 +768,12 @@ def project_week_series(db, user_id, plan, goal, weeks_back=8, weeks_forward=12)
             # happened, but rendering "0 mi" reads as "you ran nothing", which is a claim
             # about a week nobody has had the chance to run yet. null renders as a dash.
             actual_mi = None
+            actual_tss = None
         rolling_base_mi = target_mi
 
         weeks.append({
             "weekStart": cursor.isoformat(), "phase": phase, "isDeload": is_deload,
-            "frozen": frozen, "targetMi": target_mi, "actualMi": actual_mi,
+            "frozen": frozen, "targetMi": target_mi, "actualMi": actual_mi, "actualTss": actual_tss,
             "activityType": activity_type,
             "isProjection": is_future, "isPersisted": is_persisted,
             "isCurrentWeek": cursor == current_week_start,
@@ -966,16 +1005,16 @@ def _generate_endurance(db, user_id, date, readiness_result, config, activity_ty
 
     # Computed regardless of which branch below actually sources the budget — needed
     # by both (Run's persisted WeeklyPlan doesn't record whether *it* used the
-    # cold-start branch internally) for the day_share decision further down.
-    _, is_cold_start = _ramp_base_mileage(db, user_id, week_start, activity_type, config)
+    # cold-start branch internally) for the day_share decision further down, and now
+    # also for the always-on rationale note (see below).
+    last_nonzero, is_cold_start = _ramp_base_mileage(db, user_id, week_start, activity_type, config)
+    weeks_active = _weeks_active_in_activity(db, user_id, week_start, activity_type) if is_cold_start else 0
 
     if activity_type == "Run":
         plan = _get_or_create_weekly_plan(db, user_id, week_start, phase, config)
         budget = plan.target_tss or 20.0
         is_deload = plan.is_deload
     else:
-        last_nonzero, _ = _ramp_base_mileage(db, user_id, week_start, activity_type, config)
-        weeks_active = _weeks_active_in_activity(db, user_id, week_start, activity_type) if is_cold_start else 0
         is_deload = _is_deload_week(config, week_start)
         budget = _compute_weekly_budget(
             last_nonzero, is_cold_start, config.weekly_ramp_pct or 3.0, phase, is_deload, weeks_active,
@@ -984,7 +1023,27 @@ def _generate_endurance(db, user_id, date, readiness_result, config, activity_ty
 
     base_type = "easy" if ignore_schedule else _skeleton_workout_type(date.weekday(), phase, skeleton)
 
-    trigger_notes = []
+    # Always-on rationale — a downgrade/deload day already explains itself via
+    # trigger_notes below, but an undisturbed "normal" day previously left `notes`
+    # empty, which is exactly why nightly-generated workouts can read as arbitrary
+    # even though every one of them is pure formula. Real generator math, not
+    # editorializing — mirrors _mesocycle_position/_compute_weekly_budget exactly.
+    meso_position, meso_cycle_len = _mesocycle_position(config, week_start)
+    deload_suffix = " (deload)" if is_deload else ""
+    if is_cold_start:
+        rationale = (
+            f"{phase.title()} phase, week {meso_position} of {meso_cycle_len}{deload_suffix} — "
+            f"cold start, week {weeks_active + 1}: {budget:.1f}mi budget "
+            f"(+{COLD_START_WEEKLY_INCREMENT_MILES:.1f}mi/wk from {COLD_START_INITIAL_MILES:.1f}mi)."
+        )
+    else:
+        ramp_pct = config.weekly_ramp_pct or 3.0
+        rationale = (
+            f"{phase.title()} phase, week {meso_position} of {meso_cycle_len}{deload_suffix} — "
+            f"week target {budget:.1f}mi ({last_nonzero:.1f}mi base +{ramp_pct:.0f}% ramp)."
+        )
+
+    trigger_notes = [rationale]
     workout_type = base_type
 
     if severe_health:
@@ -1047,6 +1106,13 @@ def _generate_endurance(db, user_id, date, readiness_result, config, activity_ty
                 # discipline gets prescriptions too short to be worth doing, and the ramp
                 # takes months to reach a useful session.
                 target_distance_mi = floor
+        if target_distance_mi is not None and workout_type == "long" and activity_type == "Run":
+            cap = config.long_run_cap_mi or DEFAULT_LONG_RUN_CAP_MI
+            if target_distance_mi > cap:
+                trigger_notes.append(
+                    f"Long run capped at {cap:.1f}mi — the weekly-share formula would "
+                    f"have given {target_distance_mi:.1f}mi.")
+                target_distance_mi = cap
 
     # Neither "rest" nor "cross_train" are really "a Run"/"a Ride" — normalizing both
     # to "Other" avoids a rest day (nothing done at all) misleadingly reading as
@@ -1194,10 +1260,18 @@ HOLD_CAP_SEC = 60
 # strength_days_per_week -> which weekdays (Mon=0) host a session
 WEEKDAY_STRENGTH_SLOTS = {1: [1], 2: [0, 3], 3: [0, 2, 4], 4: [0, 1, 3, 4]}
 
+# Concurrent-training periodization — standard practice is to taper lifting VOLUME
+# (not intensity: weight/reps still hold at current progression, see
+# apply_strength_progression) as the race phase approaches, to protect recovery for
+# the endurance side's own key sessions. Only base/build/peak/taper wire in here
+# (`_phase_for_date`'s own set); base/build keep the existing 3-sets-normal/2-if-light
+# behavior unchanged (not listed = falls through to that default).
+PHASE_SET_COUNT_CAP = {"peak": 2, "taper": 1}
 
-def _build_exercise_step(ex: dict, progress: dict, light: bool) -> dict:
+
+def _build_exercise_step(ex: dict, progress: dict, light: bool, set_count: int | None = None) -> dict:
     rest_seconds = 90 if ex["category"] in ("squat", "hinge") else 60
-    set_count = 2 if light else 3
+    set_count = set_count if set_count is not None else (2 if light else 3)
     if ex["targetType"] == "hold_sec":
         hold_sec = 20 if light else (progress["currentHoldSec"] or 20)
         sets = [
@@ -1270,14 +1344,23 @@ def _generate_strength(db, user_id, date, readiness_result, config, template_ove
     severe_health = _has_severe_health_note(db, user_id)
     light = severe_health or len(flags) >= 2
 
+    # Same phase the endurance path periodizes around — readiness/health-driven `light`
+    # still wins when both apply (a flagged day trims volume regardless of phase).
+    phase = _phase_for_date(db, user_id, date, goal=resolve_periodization_goal(db, user_id, date))
+    maintenance_phase = not light and phase in PHASE_SET_COUNT_CAP
+    set_count = 2 if light else PHASE_SET_COUNT_CAP.get(phase, 3)
+
     steps = [
-        _build_exercise_step(ex, coach.get_exercise_progress(db, ex["exercise"], user_id), light)
+        _build_exercise_step(ex, coach.get_exercise_progress(db, ex["exercise"], user_id), light, set_count)
         for ex in exercises
     ]
     if light:
         notes = "Readiness/health flagged — light bodyweight session, no progression check this time."
     elif len(flags) == 1:
         notes = "Holding at current weights/targets — readiness flagged, pausing progression this session."
+    elif maintenance_phase:
+        notes = (f"{phase.title()} phase — volume trimmed to {set_count} sets, holding current "
+                 f"strength targets to protect run quality.")
     else:
         notes = f"{template_name.replace('_', ' ').title()} {half} — prescribed from current progression."
 
@@ -1292,7 +1375,19 @@ def apply_strength_progression(db, workout: Workout) -> None:
     """Called by coach.update_workout once a strength Workout's status transitions to
     "completed" with actuals logged. Double progression, evaluated per exercise: if
     every logged set in this session hit (or exceeded) its target, bump the exercise's
-    ExerciseProgress for next time; otherwise hold steady (v1 never auto-decreases)."""
+    ExerciseProgress for next time; otherwise hold steady (v1 never auto-decreases).
+
+    During peak/taper (PHASE_SET_COUNT_CAP — see _generate_strength), weight/reps/hold
+    are held steady even on a fully-hit session: the reduced-volume maintenance dose is
+    deliberate periodization, not a session to reward with a fresh increment right
+    before a race. Phase is resolved from the workout's own scheduled_date (not
+    "today") so a late-logged session still gets evaluated against the phase it was
+    actually prescribed in. Progression resumes automatically once back in base/build."""
+    user_id = workout.user_id or DEFAULT_USER_ID
+    workout_date = datetime.strptime(workout.scheduled_date, "%Y-%m-%d").date()
+    phase = _phase_for_date(db, user_id, workout_date, goal=resolve_periodization_goal(db, user_id, workout_date))
+    maintenance_phase = phase in PHASE_SET_COUNT_CAP
+
     steps = coach._steps_from_json(workout.steps_json) or []
     for step in steps:
         if step.get("stepType") != "strength_exercise":
@@ -1300,19 +1395,19 @@ def apply_strength_progression(db, workout: Workout) -> None:
         sets = step.get("sets", [])
         if not sets or any(s.get("actualReps") is None and s.get("actualHoldSec") is None for s in sets):
             continue  # not actually logged — nothing to evaluate
-        progress = coach.get_exercise_progress(db, step["exercise"], workout.user_id or DEFAULT_USER_ID)
+        progress = coach.get_exercise_progress(db, step["exercise"], user_id)
         now_iso = datetime.now(timezone.utc).isoformat()
         if sets[0]["targetType"] == "hold_sec":
             hit_all = all((s.get("actualHoldSec") or 0) >= (s.get("targetHoldSec") or 0) for s in sets)
-            if hit_all:
+            if hit_all and not maintenance_phase:
                 new_hold = min((progress["currentHoldSec"] or sets[0]["targetHoldSec"] or 20) + HOLD_INCREMENT_SEC, HOLD_CAP_SEC)
-                coach.upsert_exercise_progress(db, step["exercise"], workout.user_id or DEFAULT_USER_ID,
+                coach.upsert_exercise_progress(db, step["exercise"], user_id,
                                                 current_hold_sec=new_hold, last_completed_at=now_iso)
             else:
-                coach.upsert_exercise_progress(db, step["exercise"], workout.user_id or DEFAULT_USER_ID, last_completed_at=now_iso)
+                coach.upsert_exercise_progress(db, step["exercise"], user_id, last_completed_at=now_iso)
         else:
             hit_all = all((s.get("actualReps") or 0) >= (s.get("targetReps") or 0) for s in sets)
-            if hit_all and sets[0].get("targetWeightLb") is not None:
+            if hit_all and not maintenance_phase and sets[0].get("targetWeightLb") is not None:
                 category = next(
                     (e["category"] for tpl in STRENGTH_TEMPLATES.values() for half in tpl.values()
                      for e in half if e["exercise"] == step["exercise"]),
@@ -1320,10 +1415,10 @@ def apply_strength_progression(db, workout: Workout) -> None:
                 )
                 increment = WEIGHT_INCREMENT_LB.get(category, 5)
                 new_weight = (progress["currentWeightLb"] or sets[0]["targetWeightLb"] or 0) + increment
-                coach.upsert_exercise_progress(db, step["exercise"], workout.user_id or DEFAULT_USER_ID,
+                coach.upsert_exercise_progress(db, step["exercise"], user_id,
                                                 current_weight_lb=new_weight, last_completed_at=now_iso)
             else:
-                coach.upsert_exercise_progress(db, step["exercise"], workout.user_id or DEFAULT_USER_ID, last_completed_at=now_iso)
+                coach.upsert_exercise_progress(db, step["exercise"], user_id, last_completed_at=now_iso)
 
 
 # ---------- Recovery quick-generate (Phase 14) ----------

@@ -586,6 +586,12 @@ class UserTrainingConfig(Base):
     # synced here would otherwise be ramped from the 3-mile absolute-beginner floor.
     # Never overrides real data — see generator._ramp_base_mileage's fallback order.
     seed_weekly_miles_json = Column(Text, nullable=True)
+    # Absolute ceiling (miles) on a single long-run session, independent of DAY_SHARE's
+    # percentage-of-weekly-budget share — without one, the long run grows unbounded as
+    # weekly volume ramps through build/peak (DAY_SHARE only bounds it relative to that
+    # week's own total). NULL = generator.DEFAULT_LONG_RUN_CAP_MI, a conservative
+    # default; set explicitly for an athlete who's actually trained beyond it.
+    long_run_cap_mi = Column(Float, nullable=True)
 
 
 class ExerciseProgress(Base):
@@ -604,10 +610,12 @@ class ExerciseProgress(Base):
 
 class WeeklyPlan(Base):
     """Phase 4.3 — one row per (user, week). `target_tss`/`actual_tss` are named for
-    the spec's eventual real Training Stress Score (Phase 6.1's per-activity TSS
-    hasn't shipped yet) but store a mileage-based proxy for now — same "real number
-    now, real TSS once Phase 6 exists" tradeoff stats.readiness() already makes for
-    acuteChronicRatio. `frozen` marks a week whose budget didn't ramp because a
+    the spec's eventual real Training Stress Score but store a mileage-based proxy —
+    the budget math (generator.py's DAY_SHARE/_compute_weekly_budget, and the P20 plan
+    view built on top of it) is miles-denominated end to end, so this stays a
+    deliberate proxy rather than a partial migration; generator.plan_week_view()
+    surfaces a real per-week TSS figure alongside it instead. `frozen` marks a week
+    whose budget didn't ramp because a
     2+-flag readiness day capped it that week; the next week ramps from the frozen
     base, not from the (unmet) target, so a bad week doesn't get "made up" all at once."""
     __tablename__ = "weekly_plan"
