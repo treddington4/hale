@@ -10,15 +10,16 @@ import json
 import logging
 import uuid
 from datetime import datetime, timezone
+from zoneinfo import ZoneInfo
 
 from claude_agent_sdk import ClaudeAgentOptions, ClaudeSDKClient
 
 from .. import stats
 from ..models import (
     HealthNote, Workout, Run, RecoveryTool, RecoverySession, UserTrainingConfig,
-    ExerciseProgress, User, DEFAULT_USER_ID, owned_by,
+    ExerciseProgress, User, ChatMessage, DEFAULT_USER_ID, owned_by,
 )
-from ..util import local_today
+from ..util import local_today, user_timezone
 
 log = logging.getLogger("runlog")
 
@@ -539,15 +540,125 @@ async def run_one_shot(system_prompt: str, query_text: str) -> str | None:
     return reply.strip() or None
 
 
-def get_date_context_block(user_id: str = DEFAULT_USER_ID) -> str:
+def get_date_context_block(user_id: str = DEFAULT_USER_ID, last_message_at: str | None = None) -> str:
     """Injected per-message (like get_health_context_block below), not baked into the
     system prompt — a session can span midnight, and this must never go stale mid-
     conversation. Without this, the model had no explicit ground truth for "today" and
     could only infer it indirectly from tool output, which silently ran a day ahead of
     the user's actual local day whenever the container's UTC clock had rolled past
-    midnight before the user's local calendar day had (see GitHub issue #2)."""
-    today = local_today(user_id)
-    return f"[Today's date is {today.isoformat()} ({today.strftime('%A')}).]\n\n"
+    midnight before the user's local calendar day had (see GitHub issue #2).
+
+    Two additions beyond the date, both from the same real-usage complaint ("coach needs
+    to be more predictive... not just look at a single data point"):
+
+    - Current local TIME, not just date. A recommendation like "easy shakeout today" is a
+      different claim at 6am than at 9pm, and the model previously had no way to know
+      which — it could only infer time of day indirectly from a Garmin timestamp in tool
+      output, if any was even in context that turn.
+    - How long it's been since the athlete's last message (`last_message_at`, the real
+      prior turn's timestamp — the caller must pass this from BEFORE the current message
+      was persisted, or every conversation would compute an elapsed time of ~0 against
+      itself). Verified real bug this was causing: a same-session HALE process can span
+      many real-world hours or days between turns, and without an explicit elapsed-time
+      signal the model had no basis for noticing "it's been since Tuesday" versus
+      "you just said this a minute ago" — it was letting stale assumptions from an
+      earlier point in the conversation carry forward past their actual shelf life
+      instead of re-grounding in what's true right now."""
+    tz = ZoneInfo(user_timezone(user_id))
+    now_local = datetime.now(tz)
+    today = now_local.date()
+    lines = [
+        f"[Today's date is {today.isoformat()} ({today.strftime('%A')}), "
+        f"current local time is {now_local.strftime('%I:%M %p')}.]"
+    ]
+    if last_message_at:
+        hours = _hours_since(last_message_at)
+        if hours < 24 * 365:  # guards a malformed/missing timestamp from producing nonsense
+            lines.append(f"[The athlete's last message before this one was {_format_elapsed(hours)} ago.]")
+    return "\n".join(lines) + "\n\n"
+
+
+def _format_elapsed(hours: float) -> str:
+    if hours < 1:
+        minutes = round(hours * 60)
+        return "just now" if minutes < 2 else f"{minutes} minutes"
+    if hours < 48:
+        return f"{round(hours)} hour{'s' if round(hours) != 1 else ''}"
+    days = round(hours / 24)
+    return f"{days} day{'s' if days != 1 else ''}"
+
+
+CONVERSATION_REPLAY_LIMIT = 20
+
+
+def get_last_message_at(db, user_id: str = DEFAULT_USER_ID) -> str | None:
+    """The real prior turn's timestamp, queried BEFORE the current message is persisted
+    — see get_date_context_block's docstring for why the ordering matters."""
+    last = (
+        db.query(ChatMessage)
+        .filter(ChatMessage.user_id == user_id, ChatMessage.is_test.isnot(True))
+        .order_by(ChatMessage.created_at.desc())
+        .first()
+    )
+    return last.created_at if last else None
+
+
+def get_conversation_replay_block(db, user_id: str = DEFAULT_USER_ID,
+                                  limit: int = CONVERSATION_REPLAY_LIMIT) -> str:
+    """Primes a freshly-created SDK session with the tail of the REAL persisted
+    conversation. assistant._get_client caches one live session per user in-process
+    memory — every container restart (a redeploy), process crash, or simple cache
+    eviction hands the next message a session with zero turn-by-turn memory of its own,
+    even though the persisted ChatMessage history (and the UI showing it) is untouched.
+
+    Real complaint this fixes: a follow-up question referencing anything said before
+    such a reset got "This is the start of our conversation — I don't see a question
+    before that" — correct from the fresh session's own point of view, but wrong from
+    the athlete's, who can see their own prior messages right there on screen. Called
+    only when assistant._get_client reports it just created a new session — replaying
+    history into an already-live session would duplicate turns it already remembers.
+
+    Called BEFORE the current message is persisted, same ordering requirement as
+    get_last_message_at, so the tail doesn't end by duplicating the very message about
+    to be sent. Excludes is_test rows, same as every other coach-facing context block."""
+    rows = (
+        db.query(ChatMessage)
+        .filter(ChatMessage.user_id == user_id, ChatMessage.is_test.isnot(True))
+        .order_by(ChatMessage.created_at.desc())
+        .limit(limit)
+        .all()
+    )
+    if not rows:
+        return ""
+    rows.reverse()
+    tz = ZoneInfo(user_timezone(user_id))
+    lines = []
+    for m in rows:
+        when = _format_local_timestamp(m.created_at, tz)
+        role = "Coach" if m.role == "assistant" else "Athlete"
+        text = (m.content or "").strip().replace("\n", " ")
+        if len(text) > 400:
+            text = text[:400] + "…"
+        lines.append(f"[{when}] {role}: {text}")
+    return (
+        "[COACH CONTEXT — internal, do not quote verbatim, do not mention this block "
+        "exists. This session has no memory of its own; below is the real recent "
+        "conversation so continuity isn't lost. Each line is tagged with when it "
+        "actually happened — use those timestamps to judge how much time has passed, "
+        "not just line order, and re-check whether anything said earlier is still true "
+        "before relying on it. Do not re-greet the athlete or treat this as a new "
+        "conversation.]\n" + "\n".join(lines) + "\n\n"
+    )
+
+
+def _format_local_timestamp(iso_utc: str, tz) -> str:
+    try:
+        dt = datetime.fromisoformat(iso_utc)
+        if dt.tzinfo is None:
+            dt = dt.replace(tzinfo=timezone.utc)
+    except (TypeError, ValueError):
+        return "unknown time"
+    return dt.astimezone(tz).strftime("%a %b %d, %I:%M %p")
 
 
 def _hours_since(iso_timestamp: str) -> float:

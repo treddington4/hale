@@ -571,7 +571,7 @@ def _current_persona_inputs(user_id: str = DEFAULT_USER_ID) -> tuple[str, str | 
         db.close()
 
 
-async def _get_client(user_id: str = DEFAULT_USER_ID, is_test: bool = False) -> ClaudeSDKClient:
+async def _get_client(user_id: str = DEFAULT_USER_ID, is_test: bool = False) -> tuple[ClaudeSDKClient, bool]:
     """One SDK session per (user, is_test), not one shared session for the whole app —
     otherwise two real users' conversations would bleed into each other's live SDK-side
     context (the turn-by-turn memory the SDK keeps internally, separate from the
@@ -587,9 +587,20 @@ async def _get_client(user_id: str = DEFAULT_USER_ID, is_test: bool = False) -> 
     built fresh per client rather than once at import time, since the system prompt
     depends on that user's coach_personality. reset_client() (below) forces a rebuild
     for one user (both variants) only — the next message from that user rebuilds with
-    the new tone; other users' sessions are untouched."""
+    the new tone; other users' sessions are untouched.
+
+    Returns `(client, was_created)`. `was_created` tells the caller this session has no
+    turn-by-turn memory of its own yet — the cache is in-process memory, so a container
+    restart (a redeploy), a crash, or reset_client() all produce exactly this. Real
+    complaint this exists to let the caller fix: without it, a fresh session presented
+    with a mid-conversation follow-up correctly (from its own point of view) said "This
+    is the start of our conversation — I don't see a question before that", while the
+    persisted ChatMessage history — and the UI showing it — was completely intact. The
+    caller (send_message) uses this to prime a new session with real recent history
+    (coach.get_conversation_replay_block) instead of leaving it blank."""
     key = (user_id, is_test)
-    if key not in _clients:
+    was_created = key not in _clients
+    if was_created:
         server = create_sdk_mcp_server(name="runlog", version="0.1.0", tools=_build_tools(user_id, is_test))
         options = ClaudeAgentOptions(
             mcp_servers={"runlog": server},
@@ -607,7 +618,7 @@ async def _get_client(user_id: str = DEFAULT_USER_ID, is_test: bool = False) -> 
         client = ClaudeSDKClient(options=options)
         await client.connect()
         _clients[key] = client
-    return _clients[key]
+    return _clients[key], was_created
 
 
 async def reset_client(user_id: str = DEFAULT_USER_ID):
@@ -645,6 +656,23 @@ async def send_message(user_text: str, user_id: str = DEFAULT_USER_ID, is_test: 
     if not is_configured():
         raise RuntimeError("AI assistant not configured — set CLAUDE_CODE_OAUTH_TOKEN or ANTHROPIC_API_KEY")
 
+    client, was_created = await _get_client(user_id, is_test)
+
+    # Read BEFORE persisting the current message — get_date_context_block's "how long
+    # since your last message" and get_conversation_replay_block's history tail must
+    # both reflect the conversation as it stood before this turn, not include the turn
+    # itself (which would report ~0 elapsed time / duplicate the message query() sends
+    # a few lines down).
+    db = SessionLocal()
+    try:
+        last_message_at = coach.get_last_message_at(db, user_id)
+        # Only a freshly-created session needs replaying — one already live in-process
+        # has its own real turn-by-turn memory, and replaying into it would just
+        # duplicate turns it already remembers.
+        replay_context = coach.get_conversation_replay_block(db, user_id) if was_created else ""
+    finally:
+        db.close()
+
     _persist("user", user_text, user_id=user_id, is_test=is_test)  # persist the ORIGINAL text
                                   # only — the health context block below is injected into what
                                   # the model sees, never into chat history or the UI
@@ -656,8 +684,8 @@ async def send_message(user_text: str, user_id: str = DEFAULT_USER_ID, is_test: 
     finally:
         db.close()
 
-    client = await _get_client(user_id, is_test)
-    await client.query(coach.get_date_context_block(user_id) + health_context + recovery_context
+    date_context = coach.get_date_context_block(user_id, last_message_at)
+    await client.query(date_context + replay_context + health_context + recovery_context
                         + activity_context + user_text)
 
     reply_text = ""
